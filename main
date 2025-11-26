@@ -1,0 +1,250 @@
+// Jogo Educativo de Sustentabilidade em SDL2
+// Adaptação do jogo educativo da professora/pedagoga Silvia
+// Página inicial com menu (3 opções) + vídeo educativo
+// Cada opção abre um "tile" temático + quiz + botão para voltar
+
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define LARG 1000
+#define ALT 600
+
+typedef enum { EST_MENU, EST_MEIO_AMBIENTE, EST_ENERGIA, EST_AGUA, EST_VIDEO } Estado;
+
+SDL_Window *janela = NULL;
+SDL_Renderer *render = NULL;
+TTF_Font *fonte = NULL;
+
+// --- UTIL: cria textura de texto com checagem de erro ---
+SDL_Texture* cria_textura_texto(const char *msg, SDL_Color cor) {
+    if (!fonte) return NULL;
+    SDL_Surface *surf = TTF_RenderText_Blended(fonte, msg, cor);
+    if (!surf) return NULL;
+    SDL_Texture *tex = SDL_CreateTextureFromSurface(render, surf);
+    SDL_FreeSurface(surf);
+    return tex;
+}
+
+void renderiza_texto_central(const char *msg, int y) {
+    SDL_Color branco = {255,255,255,255};
+    SDL_Texture *t = cria_textura_texto(msg, branco);
+    if (!t) return; // se fonte/texture nao disponivel, nao crashar
+    int w, h; SDL_QueryTexture(t, NULL, NULL, &w, &h);
+    SDL_Rect r = { (LARG-w)/2, y, w, h };
+    SDL_RenderCopy(render, t, NULL, &r);
+    SDL_DestroyTexture(t);
+}
+
+// Renderiza botão (texto) — também retorna rect para checagem de clique
+SDL_Rect render_botao(const char *msg, int y) {
+    SDL_Color branco = {255,255,255,255};
+    SDL_Texture *t = cria_textura_texto(msg, branco);
+    SDL_Rect r = {0,0,0,0};
+    if (!t) return r;
+    int w,h; SDL_QueryTexture(t, NULL, NULL, &w, &h);
+    r.x = (LARG-w)/2; r.y = y; r.w = w; r.h = h;
+    // desenha retangulo de fundo leve
+    SDL_Rect fundo = { r.x-10, r.y-6, r.w+20, r.h+12 };
+    SDL_SetRenderDrawColor(render, 20, 110, 80, 255);
+    SDL_RenderFillRect(render, &fundo);
+    SDL_RenderCopy(render, t, NULL, &r);
+    SDL_DestroyTexture(t);
+    return r;
+}
+
+bool dentro_rect(SDL_Rect r, int mx, int my) {
+    return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h;
+}
+
+// Desenha tela de quiz (retorna os rects dos dois botões via argumentos)
+void desenha_quiz_frame(const char *pergunta, const char *resp1, const char *resp2, SDL_Rect *r1_out, SDL_Rect *r2_out) {
+    SDL_SetRenderDrawColor(render, 0, 70, 70, 255);
+    SDL_RenderClear(render);
+    renderiza_texto_central(pergunta, 150);
+    SDL_Rect r1 = render_botao(resp1, 300);
+    SDL_Rect r2 = render_botao(resp2, 360);
+    renderiza_texto_central("(clique ou pressione 1/2)", 430);
+    SDL_RenderPresent(render);
+    if (r1_out) *r1_out = r1;
+    if (r2_out) *r2_out = r2;
+}
+
+// Quiz simples de 1 pergunta
+int quiz(const char *pergunta, const char *resp1, const char *resp2, int correta) {
+    int pontos = 0; bool respondido = false; int escolha = 0;
+    SDL_Event e;
+    SDL_Rect r1 = {0}, r2 = {0};
+
+    // primeiro frame (gera rects visíveis)
+    desenha_quiz_frame(pergunta, resp1, resp2, &r1, &r2);
+
+    while(!respondido) {
+        while(SDL_WaitEventTimeout(&e)) {
+            if(e.type == SDL_QUIT) return 0;
+            if(e.type == SDL_MOUSEBUTTONDOWN) {
+                int mx = e.button.x; int my = e.button.y;
+                if(dentro_rect(r1,mx,my)) { escolha = 1; respondido = true; }
+                else if(dentro_rect(r2,mx,my)) { escolha = 2; respondido = true; }
+            }
+            if(e.type == SDL_KEYDOWN) {
+                if(e.key.keysym.sym == SDLK_1) { escolha = 1; respondido = true; }
+                else if(e.key.keysym.sym == SDLK_2) { escolha = 2; respondido = true; }
+            }
+        }
+        // redesenha a cada frame para manter animações/visual atualizados
+        desenha_quiz_frame(pergunta, resp1, resp2, &r1, &r2);
+        SDL_Delay(16);
+    }
+
+    if(escolha == correta) pontos = 10;
+    // mostra resultado por curto período
+    SDL_SetRenderDrawColor(render, 0, 90, 120, 255);
+    SDL_RenderClear(render);
+    if(pontos>0) renderiza_texto_central("Resposta correta! +10 pontos", 250);
+    else renderiza_texto_central("Resposta errada. 0 pontos", 250);
+    SDL_RenderPresent(render);
+    SDL_Delay(1000);
+    return pontos;
+}
+
+void desenha_pagina_opcao_frame(const char *titulo, int pontos, SDL_Rect *r_voltar) {
+    SDL_SetRenderDrawColor(render, 0, 90, 120, 255);
+    SDL_RenderClear(render);
+    renderiza_texto_central(titulo, 100);
+    char buf[64]; sprintf(buf, "Pontuação: %d", pontos);
+    renderiza_texto_central(buf, 200);
+    SDL_Rect r = render_botao("Voltar", 500);
+    SDL_RenderPresent(render);
+    if (r_voltar) *r_voltar = r;
+}
+
+void pagina_opcao(const char *titulo, const char *pergunta, const char *r1, const char *r2, int correta) {
+    int pontos = quiz(pergunta, r1, r2, correta);
+    bool voltar = false; SDL_Event e; SDL_Rect r_voltar = {0};
+
+    // primeiro frame
+    desenha_pagina_opcao_frame(titulo, pontos, &r_voltar);
+
+    while(!voltar) {
+        while(SDL_WaitEventTimeout(&e)) {
+            if(e.type == SDL_QUIT) return;
+            if(e.type == SDL_MOUSEBUTTONDOWN) {
+                int mx = e.button.x; int my = e.button.y;
+                if(dentro_rect(r_voltar, mx, my)) { voltar = true; break; }
+            }
+            if(e.type == SDL_KEYDOWN) if(e.key.keysym.sym == SDLK_ESCAPE) { voltar = true; break; }
+        }
+        desenha_pagina_opcao_frame(titulo, pontos, &r_voltar);
+        SDL_Delay(16);
+    }
+}
+
+void video_educativo() {
+    SDL_Event e; bool sair = false;
+    Uint32 start = SDL_GetTicks();
+
+    while(!sair) {
+        while(SDL_WaitEventTimeout(&e)) {
+            if(e.type == SDL_QUIT) return;
+            if(e.type == SDL_KEYDOWN || e.type == SDL_MOUSEBUTTONDOWN) sair = true;
+        }
+        SDL_SetRenderDrawColor(render, 10, 10, 10, 255);
+        SDL_RenderClear(render);
+        renderiza_texto_central("[VIDEO EDUCATIVO SIMULADO] - Pressione qualquer tecla para sair", 250);
+        // simular progresso
+        int t = (SDL_GetTicks()-start) % 5000;
+        SDL_Rect barra = { 100, 350, (int)((LARG-200) * (t/5000.0f)), 30 };
+        SDL_SetRenderDrawColor(render, 50, 150, 200, 255);
+        SDL_RenderFillRect(render, &barra);
+        SDL_RenderPresent(render);
+        SDL_Delay(16);
+    }
+}
+
+int main(int argc, char **argv) {
+    if(SDL_Init(SDL_INIT_VIDEO) != 0) { fprintf(stderr, "SDL_Init: %s
+", SDL_GetError()); return 1; }
+    if(TTF_Init() != 0) { fprintf(stderr, "TTF_Init: %s
+", TTF_GetError()); SDL_Quit(); return 1; }
+
+    janela = SDL_CreateWindow("Jogo Sustentabilidade", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, LARG, ALT, 0);
+    if(!janela) { fprintf(stderr, "CreateWindow: %s
+", SDL_GetError()); TTF_Quit(); SDL_Quit(); return 1; }
+    render = SDL_CreateRenderer(janela, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if(!render) { fprintf(stderr, "CreateRenderer: %s
+", SDL_GetError()); SDL_DestroyWindow(janela); TTF_Quit(); SDL_Quit(); return 1; }
+
+    // Tentar abrir fonte. Colocar arquivo TTF na pasta executavel ou em assets/
+    const char *fontfile = "assets/DejaVuSans.ttf";
+    fonte = TTF_OpenFont(fontfile, 28);
+    if(!fonte) {
+        fprintf(stderr, "Nao conseguiu abrir fonte '%s': %s
+Tentando 'FreeSans.ttf'...
+", fontfile, TTF_GetError());
+        fonte = TTF_OpenFont("assets/FreeSans.ttf", 28);
+        if(!fonte) fprintf(stderr, "Falha ao abrir fonte fallback: %s
+", TTF_GetError());
+    }
+
+    bool rodando = true; Estado estado = EST_MENU; SDL_Event e; int mx=0,my=0; bool click=false;
+
+    // Rects do menu (mantidos entre frames)
+    SDL_Rect b1={0}, b2={0}, b3={0}, b4={0};
+
+    while(rodando) {
+        click = false;
+        while(SDL_WaitEventTimeout(&e)) {
+            if(e.type == SDL_QUIT) { rodando = false; }
+            if(e.type == SDL_MOUSEMOTION) { mx = e.motion.x; my = e.motion.y; }
+            if(e.type == SDL_MOUSEBUTTONDOWN) click = true;
+            if(e.type == SDL_KEYDOWN) {
+                if(e.key.keysym.sym == SDLK_ESCAPE) rodando = false;
+            }
+        }
+
+        SDL_SetRenderDrawColor(render, 30, 30, 30, 255);
+        SDL_RenderClear(render);
+
+        if(estado == EST_MENU) {
+            renderiza_texto_central("Jogo da Sustentabilidade", 120);
+            b1 = render_botao("Meio Ambiente", 250);
+            b2 = render_botao("Energia", 310);
+            b3 = render_botao("Água", 370);
+            b4 = render_botao("Vídeo Educativo", 430);
+
+            if(click) {
+                if(dentro_rect(b1,mx,my)) estado = EST_MEIO_AMBIENTE;
+                else if(dentro_rect(b2,mx,my)) estado = EST_ENERGIA;
+                else if(dentro_rect(b3,mx,my)) estado = EST_AGUA;
+                else if(dentro_rect(b4,mx,my)) estado = EST_VIDEO;
+            }
+            SDL_RenderPresent(render);
+        }
+        else if(estado == EST_VIDEO) {
+            video_educativo(); estado = EST_MENU;
+        }
+        else if(estado == EST_MEIO_AMBIENTE) {
+            pagina_opcao("Meio Ambiente", "Plantar árvores ajuda o clima?", "Sim (1)", "Nao (2)", 1);
+            estado = EST_MENU;
+        }
+        else if(estado == EST_ENERGIA) {
+            pagina_opcao("Energia", "Apagar luzes economiza energia?", "Sim (1)", "Nao (2)", 1);
+            estado = EST_MENU;
+        }
+        else if(estado == EST_AGUA) {
+            pagina_opcao("Uso da Água", "Banho longo gasta mais água?", "Sim (1)", "Não (2)", 1);
+            estado = EST_MENU;
+        }
+
+        SDL_Delay(16);
+    }
+
+    if(fonte) TTF_CloseFont(fonte);
+    SDL_DestroyRenderer(render);
+    SDL_DestroyWindow(janela);
+    TTF_Quit(); SDL_Quit();
+    return 0;
+}
