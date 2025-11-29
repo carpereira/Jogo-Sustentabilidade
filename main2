@@ -1,0 +1,336 @@
+/* Jogo Educativo de Sustentabilidade em SDL2
+ Adaptação do jogo educativo da professora/pedagoga Silvia
+Implementada página inicial
+ */
+
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
+#include <SDL2/SDL_ttf.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define LARG 1000
+#define ALT 600
+#define TIMEOUT_MS 16
+
+// Estados da aplicação
+typedef enum {
+    EST_TELA_INICIAL,
+    EST_MENU,
+    EST_TILE_AGUA,
+    EST_TILE_ENERGIA,
+    EST_TILE_MEIO,
+    EST_QUIT
+} Estado;
+
+// Retângulos de botões
+static SDL_Rect r_play = { 400, 300, 200, 80 };
+static SDL_Rect r_tema_agua = { 100, 420, 200, 80 };
+static SDL_Rect r_tema_energia = { 400, 420, 200, 80 };
+static SDL_Rect r_tema_meio = { 700, 420, 200, 80 };
+static SDL_Rect r_voltar = { 20, 20, 140, 56 };
+
+// Recursos globais simples
+static SDL_Window* janela = NULL;
+static SDL_Renderer* render = NULL;
+static TTF_Font* fonte = NULL;
+
+static SDL_Texture* tex_tile_menu = NULL;
+static SDL_Texture* tex_tile_agua = NULL;
+static SDL_Texture* tex_tile_energia = NULL;
+static SDL_Texture* tex_tile_meio = NULL;
+static SDL_Texture* tex_btn_play = NULL;
+static SDL_Texture* tex_btn_voltar = NULL;
+
+// --- utilitários ---
+static SDL_Texture* carregar_textura(const char* caminho) {
+    if (!caminho) return NULL;
+    SDL_Surface* s = IMG_Load(caminho);
+    if (!s) {
+        // fprintf(stderr, "IMG_Load('%s') erro: %s\n", caminho, IMG_GetError());
+        return NULL;
+    }
+    SDL_Texture* t = SDL_CreateTextureFromSurface(render, s);
+    SDL_FreeSurface(s);
+    return t;
+}
+
+static SDL_Texture* cria_textura_texto(const char* msg, SDL_Color cor) {
+    if (!fonte || !msg) return NULL;
+    SDL_Surface* surf = TTF_RenderUTF8_Blended(fonte, msg, cor);
+    if (!surf) return NULL;
+    SDL_Texture* tex = SDL_CreateTextureFromSurface(render, surf);
+    SDL_FreeSurface(surf);
+    return tex;
+}
+
+static bool dentro_rect(SDL_Rect r, int x, int y) {
+    return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+}
+
+static void desenhar_botao_com_textura(SDL_Texture* tex, const char* texto, SDL_Rect dst) {
+    if (tex) {
+        SDL_RenderCopy(render, tex, NULL, &dst);
+        return;
+    }
+    // fallback: retângulo + texto
+    SDL_SetRenderDrawColor(render, 20, 110, 80, 255);
+    SDL_RenderFillRect(render, &dst);
+    // borda
+    SDL_SetRenderDrawColor(render, 0, 0, 0, 255);
+    SDL_RenderDrawRect(render, &dst);
+
+    if (fonte && texto) {
+        SDL_Color verde = { 0X00,0XFF,0X00,0xFF };
+        SDL_Texture* t = cria_textura_texto(texto, verde);
+        if (t) {
+            int w, h; SDL_QueryTexture(t, NULL, NULL, &w, &h);
+            SDL_Rect r = { dst.x + (dst.w - w) / 2, dst.y + (dst.h - h) / 2, w, h };
+            SDL_RenderCopy(render, t, NULL, &r);
+            SDL_DestroyTexture(t);
+        }
+    }
+}
+
+static void liberar_recursos(void) {
+#define DEST(t) if(t){SDL_DestroyTexture(t); t=NULL;}
+    DEST(tex_tile_menu);
+    DEST(tex_tile_agua);
+    DEST(tex_tile_energia);
+    DEST(tex_tile_meio);
+    DEST(tex_btn_play);
+    DEST(tex_btn_voltar);
+#undef DEST
+
+    if (fonte) { TTF_CloseFont(fonte); fonte = NULL; }
+    if (render) { SDL_DestroyRenderer(render); render = NULL; }
+    if (janela) { SDL_DestroyWindow(janela); janela = NULL; }
+
+    IMG_Quit();
+    TTF_Quit();
+    SDL_Quit();
+}
+
+// --- telas / render ---
+static void renderizar_tela_inicial(void) {
+    // Mostra tile_menu por baixo (se existir) e mensagem central
+    if (tex_tile_menu) SDL_RenderCopy(render, tex_tile_menu, NULL, NULL);
+    else {
+        SDL_SetRenderDrawColor(render, 10, 10, 30, 255);
+        SDL_RenderClear(render);
+    }
+
+    SDL_Color verde = { 0X00,0XFF,0X00,0xFF };
+    SDL_Texture* t1 = cria_textura_texto("Jogo da Sustentabilidade", verde);
+    SDL_Texture* t2 = cria_textura_texto("Pressione qualquer tecla ou clique para continuar", (SDL_Color) { 200, 200, 200, 255 });
+
+    if (t1) {
+        int w, h; SDL_QueryTexture(t1, NULL, NULL, &w, &h);
+        SDL_Rect r = { (LARG - w) / 2, 180, w, h };
+        SDL_RenderCopy(render, t1, NULL, &r);
+        SDL_DestroyTexture(t1);
+    }
+    if (t2) {
+        int w, h; SDL_QueryTexture(t2, NULL, NULL, &w, &h);
+        SDL_Rect r = { (LARG - w) / 2, 260, w, h };
+        SDL_RenderCopy(render, t2, NULL, &r);
+        SDL_DestroyTexture(t2);
+    }
+    SDL_RenderPresent(render);
+}
+
+static void renderizar_menu(void) {
+    // fundo: tile do menu
+    if (tex_tile_menu) SDL_RenderCopy(render, tex_tile_menu, NULL, NULL);
+    else {
+        SDL_SetRenderDrawColor(render, 30, 30, 30, 255);
+        SDL_RenderClear(render);
+    }
+
+    // título
+    SDL_Texture* tit = cria_textura_texto("Jogo da Sustentabilidade", (SDL_Color) { 255, 255, 255, 255 });
+    if (tit) {
+        int w, h; SDL_QueryTexture(tit, NULL, NULL, &w, &h);
+        SDL_Rect rr = { (LARG - w) / 2, 40, w, h };
+        SDL_RenderCopy(render, tit, NULL, &rr);
+        SDL_DestroyTexture(tit);
+    }
+
+    // explicação central sobre sustentabilidade (várias linhas)
+    const char* linha1 = "Sustentabilidade: uso responsável de recursos naturais";
+    const char* linha2 = "para garantir bem-estar presente sem comprometer o futuro.";
+    const char* linha3 = "Aprenda sobre Água, Energia e Meio Ambiente.";
+    SDL_Texture* l1 = cria_textura_texto(linha1, (SDL_Color) { 230, 230, 230, 255 });
+    SDL_Texture* l2 = cria_textura_texto(linha2, (SDL_Color) { 230, 230, 230, 255 });
+    SDL_Texture* l3 = cria_textura_texto(linha3, (SDL_Color) { 200, 200, 200, 255 });
+    int ybase = 140;
+    if (l1) { int w, h; SDL_QueryTexture(l1, NULL, NULL, &w, &h); SDL_Rect r = { (LARG - w) / 2, ybase, w,h }; SDL_RenderCopy(render, l1, NULL, &r); SDL_DestroyTexture(l1); }
+    if (l2) { int w, h; SDL_QueryTexture(l2, NULL, NULL, &w, &h); SDL_Rect r = { (LARG - w) / 2, ybase + 34, w,h }; SDL_RenderCopy(render, l2, NULL, &r); SDL_DestroyTexture(l2); }
+    if (l3) { int w, h; SDL_QueryTexture(l3, NULL, NULL, &w, &h); SDL_Rect r = { (LARG - w) / 2, ybase + 68, w,h }; SDL_RenderCopy(render, l3, NULL, &r); SDL_DestroyTexture(l3); }
+
+    // botão "Jogar" (apenas demonstrativo)
+    desenhar_botao_com_textura(tex_btn_play, "Explorar (Tiles)", r_play);
+
+    // botões temáticos
+    desenhar_botao_com_textura(tex_btn_play ? NULL : NULL, "Água", r_tema_agua); // usa fallback texto
+    desenhar_botao_com_textura(tex_btn_play ? NULL : NULL, "Energia", r_tema_energia);
+    desenhar_botao_com_textura(tex_btn_play ? NULL : NULL, "Meio Ambiente", r_tema_meio);
+
+    SDL_RenderPresent(render);
+}
+
+static void renderizar_tile_exibicao(SDL_Texture* tile, const char* titulo) {
+    if (tile) SDL_RenderCopy(render, tile, NULL, NULL);
+    else {
+        SDL_SetRenderDrawColor(render, 20, 40, 60, 255);
+        SDL_RenderClear(render);
+    }
+
+    // mostra título no topo
+    if (titulo) {
+        SDL_Texture* t = cria_textura_texto(titulo, (SDL_Color) { 255, 255, 255, 255 });
+        if (t) {
+            int w, h; SDL_QueryTexture(t, NULL, NULL, &w, &h);
+            SDL_Rect r = { (LARG - w) / 2, 40, w, h };
+            SDL_RenderCopy(render, t, NULL, &r);
+            SDL_DestroyTexture(t);
+        }
+    }
+
+    // botão voltar (fundo simples ou textura)
+    desenhar_botao_com_textura(tex_btn_voltar, "Voltar", r_voltar);
+    SDL_RenderPresent(render);
+}
+
+// --- main ---
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        fprintf(stderr, "SDL_Init erro: %s\n", SDL_GetError());
+        return 1;
+    }
+
+    if (IMG_Init(IMG_INIT_PNG) == 0) {
+        // imagem pode ser opcional; continua sem texturas
+        // fprintf(stderr, "IMG_Init aviso: %s\n", IMG_GetError());
+    }
+
+    if (TTF_Init() != 0) {
+        fprintf(stderr, "TTF_Init erro: %s\n", TTF_GetError());
+        SDL_Quit();
+        return 1;
+    }
+
+    janela = SDL_CreateWindow("Jogo Sustentabilidade", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, LARG, ALT, SDL_WINDOW_SHOWN);
+    if (!janela) {
+        fprintf(stderr, "CreateWindow erro: %s\n", SDL_GetError());
+        TTF_Quit(); SDL_Quit();
+        return 1;
+    }
+
+    render = SDL_CreateRenderer(janela, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!render) {
+        fprintf(stderr, "CreateRenderer erro: %s\n", SDL_GetError());
+        SDL_DestroyWindow(janela); TTF_Quit(); SDL_Quit();
+        return 1;
+    }
+
+    // carrega fonte (fallback interno se não houver)
+    const char* fontfile = "assets/DejaVuSans.ttf";
+    fonte = TTF_OpenFont(fontfile, 24);
+    if (!fonte) {
+        fonte = TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24);
+        if (!fonte) {
+            fprintf(stderr, "Falha ao abrir fonte. Textos serão renderizados com TTF ausente.\n");
+        }
+    }
+
+    // carrega texturas (opcionais)
+    tex_tile_menu = carregar_textura("assets/tile_menu.png");
+    tex_tile_agua = carregar_textura("assets/tile_agua.png");
+    tex_tile_energia = carregar_textura("assets/tile_energia.png");
+    tex_tile_meio = carregar_textura("assets/tile_meioambiente.png");
+    tex_btn_play = carregar_textura("assets/botao_play.png");
+    tex_btn_voltar = carregar_textura("assets/botao_voltar.png");
+
+    // estado inicial: tela de abertura curta
+    Estado estado = EST_TELA_INICIAL;
+    bool rodando = true;
+    SDL_Event e;
+    Uint32 inicio = SDL_GetTicks();
+    const Uint32 DURACAO_INICIAL_MS = 5000;
+
+    // loop principal
+    while (rodando) {
+        // eventos
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) { rodando = false; break; }
+
+            if (estado == EST_TELA_INICIAL) {
+                if (e.type == SDL_KEYDOWN || e.type == SDL_MOUSEBUTTONDOWN) {
+                    estado = EST_MENU;
+                }
+            }
+            else if (estado == EST_MENU) {
+                if (e.type == SDL_MOUSEBUTTONDOWN) {
+                    int mx = e.button.x, my = e.button.y;
+                    if (dentro_rect(r_play, mx, my)) {
+                        // exemplo: abrir menu (já está no menu) — manter
+                    }
+                    else if (dentro_rect(r_tema_agua, mx, my)) {
+                        estado = EST_TILE_AGUA;
+                    }
+                    else if (dentro_rect(r_tema_energia, mx, my)) {
+                        estado = EST_TILE_ENERGIA;
+                    }
+                    else if (dentro_rect(r_tema_meio, mx, my)) {
+                        estado = EST_TILE_MEIO;
+                    }
+                }
+                if (e.type == SDL_KEYDOWN) {
+                    if (e.key.keysym.sym == SDLK_ESCAPE) { rodando = false; break; }
+                }
+            }
+            else { // estados de exibição de tile
+                if (e.type == SDL_MOUSEBUTTONDOWN) {
+                    int mx = e.button.x, my = e.button.y;
+                    if (dentro_rect(r_voltar, mx, my)) {
+                        estado = EST_MENU;
+                    }
+                }
+                if (e.type == SDL_KEYDOWN) {
+                    if (e.key.keysym.sym == SDLK_ESCAPE) estado = EST_MENU;
+                }
+            }
+        } // fim poll
+
+        // timeout da tela inicial
+        if (estado == EST_TELA_INICIAL && SDL_GetTicks() - inicio > DURACAO_INICIAL_MS) {
+            estado = EST_MENU;
+        }
+
+        // render por estado
+        if (estado == EST_TELA_INICIAL) {
+            renderizar_tela_inicial();
+        }
+        else if (estado == EST_MENU) {
+            renderizar_menu();
+        }
+        else if (estado == EST_TILE_AGUA) {
+            renderizar_tile_exibicao(tex_tile_agua, "Tema: Água");
+        }
+        else if (estado == EST_TILE_ENERGIA) {
+            renderizar_tile_exibicao(tex_tile_energia, "Tema: Energia");
+        }
+        else if (estado == EST_TILE_MEIO) {
+            renderizar_tile_exibicao(tex_tile_meio, "Tema: Meio Ambiente");
+        }
+
+        SDL_Delay(8);
+    }
+
+    liberar_recursos();
+    return 0;
+}
