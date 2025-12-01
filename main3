@@ -1,0 +1,609 @@
+/* game.c - Jogo Educativo de Sustentabilidade (arquivo �nico)
+   M�dulos integrados: avatar, menu, tiles, �udio.
+   Coment�rios did�ticos linha-a-linha em portugu�s.
+   Requisitos de compila��o: SDL2, SDL2_image, SDL2_ttf, SDL2_mixer.
+*/
+
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
+#include <SDL2/SDL_mixer.h>
+#include <SDL2/SDL_ttf.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ------------------- configura��es e caminhos ------------------- */
+#define LARG 1000                           /* largura da janela */
+#define ALT 600                             /* altura da janela */
+
+static const char* ASSET_TILE_MENU = "assets/tile_menu.png";            /* fundo do menu */
+static const char* ASSET_AVA[4] = {                                      /* avatares */
+    "assets/ava1.png", "assets/ava2.png", "assets/ava3.png", "assets/ava4.png"
+};
+static const char* ASSET_TILE_TEMA[3] = {                                /* tiles dos temas */
+    "assets/agua.png", "assets/energia.png", "assets/meioambiente.png"
+};
+static const char* ASSET_BOTAO_SEGUINTE = "assets/botao_seguinte.png";   /* bot�o seguinte (opcional) */
+static const char* ASSET_BOTAO_VOLTAR = "assets/botao_voltar.png";       /* bot�o voltar (utilizado) */
+static const char* ASSET_MUSICA_MENU = "assets/menu.ogg";               /* musica menu */
+static const char* ASSET_MUSICA_AGUA = "assets/agua.mp3";               /* musica agua */
+static const char* ASSET_MUSICA_ENERGIA = "assets/energia.mp3";         /* musica energia */
+static const char* ASSET_MUSICA_MEIO = "assets/meioambiente.mp3";       /* musica meio */
+static const char* ASSET_SOM_CLICK = "assets/click.wav";                /* som de clique */
+static const char* ASSET_FONT = "assets/DejaVuSans.ttf";                /* fonte TTF */
+
+/* ------------------- tipos e estados do jogo ------------------- */
+/* estados principais do fluxo do jogo */
+typedef enum {
+    EST_TELA_INICIAL = 0,      /* tela de abertura */
+    EST_SELECAO_AVATAR,        /* escolher avatar */
+    EST_MENU_TEMAS,            /* escolher tema (agua/energia/meio) */
+    EST_TILE_AGUA,             /* tela do tema �gua */
+    EST_TILE_ENERGIA,         /* tela do tema energia */
+    EST_TILE_MEIO,            /* tela do tema meio ambiente */
+    EST_SAIR
+} Estado;
+
+/* estrutura do avatar (textura, ret�ngulo, estado de sele��o, escala) */
+typedef struct {
+    SDL_Texture* tex;
+    SDL_Rect rect;
+    int selected;
+    float scale;
+} Avatar;
+
+/* ------------------- vari�veis globais (simples) ------------------- */
+static SDL_Window* g_window = NULL;
+static SDL_Renderer* g_renderer = NULL;
+static TTF_Font* g_font = NULL;
+
+/* texturas principais */
+static SDL_Texture* g_tile_menu = NULL;
+static SDL_Texture* g_tile_tema[3] = { NULL, NULL, NULL };
+static SDL_Texture* g_btn_seguinte_tex = NULL;
+static SDL_Texture* g_btn_voltar_tex = NULL;
+
+/* avatares */
+#define AVA_COUNT 4
+static Avatar g_avatars[AVA_COUNT];
+
+/* �udio */
+static Mix_Music* g_music_menu = NULL;
+static Mix_Music* g_music_tema[3] = { NULL, NULL, NULL };
+static Mix_Chunk* g_som_click = NULL;
+static Mix_Music* g_current_music = NULL;
+
+/* bot�es (ret�ngulos usados para �reas clic�veis) */
+static SDL_Rect r_btn_seguinte = { LARG - 220, ALT - 120, 200, 90 };  /* bot�o seguir na sele��o */
+static SDL_Rect r_btn_tema_agua = { 100, 420, 200, 80 };
+static SDL_Rect r_btn_tema_energia = { 400, 420, 200, 80 };
+static SDL_Rect r_btn_tema_meio = { 700, 420, 200, 80 };
+/* bot�o voltar posicionado no canto inferior direito (pedido) */
+static SDL_Rect r_btn_voltar = { LARG - 180, ALT - 80, 160, 60 };
+
+/* vari�vel que guarda qual avatar foi escolhido (�ndice), -1 = nenhum */
+static int g_avatar_escolhido = -1;
+
+/* ------------------- utilit�rios pequenos ------------------- */
+/* carrega textura a partir de ficheiro (retorna NULL em erro) */
+static SDL_Texture* carregar_textura_safe(const char* caminho) {
+    if (!caminho) return NULL;
+    SDL_Surface* s = IMG_Load(caminho);
+    if (!s) {
+        SDL_Log("Aviso: IMG_Load('%s') falhou: %s", caminho, IMG_GetError());
+        return NULL;
+    }
+    SDL_Texture* t = SDL_CreateTextureFromSurface(g_renderer, s);
+    SDL_FreeSurface(s);
+    return t;
+}
+
+/* desenha texto simples (cria textura tempor�ria) */
+static void desenhar_texto(const char* msg, int x, int y) {
+    if (!g_font || !msg) return;
+    SDL_Color branco = { 255, 255, 255, 255 };
+    SDL_Surface* s = TTF_RenderUTF8_Blended(g_font, msg, branco);
+    if (!s) return;
+    SDL_Texture* t = SDL_CreateTextureFromSurface(g_renderer, s);
+    if (t) {
+        SDL_Rect dst = { x, y, s->w, s->h };
+        SDL_RenderCopy(g_renderer, t, NULL, &dst);
+        SDL_DestroyTexture(t);
+    }
+    SDL_FreeSurface(s);
+}
+
+/* returna 1 se ponto (x,y) estiver dentro do rect r */
+static int dentro(const SDL_Rect* r, int x, int y) {
+    return (x >= r->x && x <= r->x + r->w && y >= r->y && y <= r->y + r->h);
+}
+
+/* desenha bot�o retangular com texto (hover n�o implementado visualmente aqui) */
+static void draw_button_rect_text(const SDL_Rect* r, const char* txt) {
+    /* corpo do bot�o */
+    SDL_SetRenderDrawColor(g_renderer, 20, 110, 80, 255);
+    SDL_RenderFillRect(g_renderer, r);
+    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+    SDL_RenderDrawRect(g_renderer, r);
+    /* texto centralizado */
+    if (g_font && txt) {
+        SDL_Color branco = { 255,255,255,255 };
+        SDL_Surface* s = TTF_RenderUTF8_Blended(g_font, txt, branco);
+        if (s) {
+            SDL_Texture* t = SDL_CreateTextureFromSurface(g_renderer, s);
+            if (t) {
+                SDL_Rect dst = { r->x + (r->w - s->w) / 2, r->y + (r->h - s->h) / 2, s->w, s->h };
+                SDL_RenderCopy(g_renderer, t, NULL, &dst);
+                SDL_DestroyTexture(t);
+            }
+            SDL_FreeSurface(s);
+        }
+    }
+}
+
+/* ------------------- avatar: init / render / click ------------------- */
+/* inicia avatares: carrega texturas, define posi��es e tamanhos reduzidos (metade) */
+static void avatar_init(void) {
+    int base_x = 120;
+    int gap = 200;
+    for (int i = 0; i < AVA_COUNT; ++i) {
+        g_avatars[i].tex = carregar_textura_safe(ASSET_AVA[i]);
+        g_avatars[i].rect.x = base_x + i * gap;
+        g_avatars[i].rect.y = 240;
+        g_avatars[i].rect.w = 150 / 2;  /* metade conforme solicitado */
+        g_avatars[i].rect.h = 150 / 2;
+        g_avatars[i].selected = 0;
+        g_avatars[i].scale = 1.0f;
+    }
+}
+
+/* destr�i texturas de avatar */
+static void avatar_destroy(void) {
+    for (int i = 0; i < AVA_COUNT; ++i) {
+        if (g_avatars[i].tex) { SDL_DestroyTexture(g_avatars[i].tex); g_avatars[i].tex = NULL; }
+    }
+}
+
+/* trata clique nos avatares: seleciona e toca som */
+static void avatar_on_click(int mx, int my) {
+    for (int i = 0; i < AVA_COUNT; ++i) {
+        if (dentro(&g_avatars[i].rect, mx, my)) {
+            /* tocar som se existir */
+            if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+            /* resetar sele��o anterior */
+            for (int j = 0; j < AVA_COUNT; ++j) { g_avatars[j].selected = 0; g_avatars[j].scale = 1.0f; }
+            /* marcar este */
+            g_avatars[i].selected = 1;
+            g_avatars[i].scale = 1.4f;
+            g_avatar_escolhido = i;
+            SDL_Log("Avatar escolhido: %d", i);
+            return;
+        }
+    }
+}
+
+/* renderiza os avatares (com crescimento quando selecionado) */
+static void avatar_render(void) {
+    for (int i = 0; i < AVA_COUNT; ++i) {
+        SDL_Rect dst = g_avatars[i].rect;
+        if (g_avatars[i].selected) {
+            dst.w = (int)(dst.w * g_avatars[i].scale);
+            dst.h = (int)(dst.h * g_avatars[i].scale);
+            dst.x = g_avatars[i].rect.x - (dst.w - g_avatars[i].rect.w) / 2;
+            dst.y = g_avatars[i].rect.y - (dst.h - g_avatars[i].rect.h) / 2;
+        }
+        if (g_avatars[i].tex) SDL_RenderCopy(g_renderer, g_avatars[i].tex, NULL, &dst);
+        else {
+            /* fallback visual se textura n�o existe */
+            SDL_SetRenderDrawColor(g_renderer, 120 + i * 20, 100 + i * 10, 140 + i * 5, 255);
+            SDL_RenderFillRect(g_renderer, &dst);
+            SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 255);
+            SDL_RenderDrawRect(g_renderer, &dst);
+        }
+    }
+}
+
+/* desenha avatar escolhido no canto superior esquerdo (pedido) */
+static void draw_selected_avatar_top_left(void) {
+    if (g_avatar_escolhido < 0 || g_avatar_escolhido >= AVA_COUNT) return;
+    SDL_Rect dst = { 16, 16, 64, 64 }; /* pequeno �cone no canto */
+    if (g_avatars[g_avatar_escolhido].tex) {
+        SDL_RenderCopy(g_renderer, g_avatars[g_avatar_escolhido].tex, NULL, &dst);
+    }
+    else {
+        SDL_SetRenderDrawColor(g_renderer, 200, 200, 200, 255);
+        SDL_RenderFillRect(g_renderer, &dst);
+        SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+        SDL_RenderDrawRect(g_renderer, &dst);
+    }
+}
+
+/* ------------------- tiles (menu e temas) ------------------- */
+/* inicializa tiles: menu e tiles por tema */
+static void tiles_init(void) {
+    g_tile_menu = carregar_textura_safe(ASSET_TILE_MENU);
+    for (int i = 0; i < 3; ++i) {
+        g_tile_tema[i] = carregar_textura_safe(ASSET_TILE_TEMA[i]);
+    }
+    g_btn_seguinte_tex = carregar_textura_safe(ASSET_BOTAO_SEGUINTE);
+    g_btn_voltar_tex = carregar_textura_safe(ASSET_BOTAO_VOLTAR);
+}
+
+/* destr�i texturas de tiles */
+static void tiles_destroy(void) {
+    if (g_tile_menu) { SDL_DestroyTexture(g_tile_menu); g_tile_menu = NULL; }
+    for (int i = 0; i < 3; ++i) { if (g_tile_tema[i]) { SDL_DestroyTexture(g_tile_tema[i]); g_tile_tema[i] = NULL; } }
+    if (g_btn_seguinte_tex) { SDL_DestroyTexture(g_btn_seguinte_tex); g_btn_seguinte_tex = NULL; }
+    if (g_btn_voltar_tex) { SDL_DestroyTexture(g_btn_voltar_tex); g_btn_voltar_tex = NULL; }
+}
+
+/* render menu (tile de fundo ou fallback) */
+static void tiles_render_menu_bg(void) {
+    if (g_tile_menu) {
+        SDL_Rect f = { 0, 0, LARG, ALT };
+        SDL_RenderCopy(g_renderer, g_tile_menu, NULL, &f);
+    }
+    else {
+        SDL_SetRenderDrawColor(g_renderer, 20, 30, 50, 255);
+        SDL_RenderClear(g_renderer);
+    }
+}
+
+/* render tela de tema (usa tile do tema se existir, e texto) */
+static void tiles_render_tema(int tema) {
+    if (tema >= 0 && tema < 3 && g_tile_tema[tema]) {
+        SDL_Rect f = { 0, 0, LARG, ALT };
+        SDL_RenderCopy(g_renderer, g_tile_tema[tema], NULL, &f);
+    }
+    else {
+        if (tema == 0) SDL_SetRenderDrawColor(g_renderer, 50, 130, 200, 255);
+        else if (tema == 1) SDL_SetRenderDrawColor(g_renderer, 200, 160, 60, 255);
+        else SDL_SetRenderDrawColor(g_renderer, 80, 160, 80, 255);
+        SDL_Rect f = { 0,0,LARG,ALT };
+        SDL_RenderFillRect(g_renderer, &f);
+    }
+    /* t�tulo e par�grafo */
+    if (g_font) {
+        const char* titulo = (tema == 0) ? "Tema: �gua" : (tema == 1) ? "Tema: Energia" : "Tema: Meio Ambiente";
+        const char* par = (tema == 0) ? "Economize �gua: feche torneiras, aproveite chuva para jardinagem."
+            : (tema == 1) ? "Use energia eficientemente: desligue aparelhos em stand-by."
+            : "Preserve o meio: recicle e reduza o consumo.";
+        /* desenha t�tulo */
+        SDL_Color branco = { 255,255,255,255 };
+        SDL_Surface* st = TTF_RenderUTF8_Blended(g_font, titulo, branco);
+        if (st) {
+            SDL_Texture* tt = SDL_CreateTextureFromSurface(g_renderer, st);
+            SDL_Rect dst = { (LARG - st->w) / 2, 40, st->w, st->h };
+            SDL_FreeSurface(st);
+            if (tt) { SDL_RenderCopy(g_renderer, tt, NULL, &dst); SDL_DestroyTexture(tt); }
+        }
+        /* desenha par�grafo com wrap simples: cria superf�cie wrapped via TTF */
+        SDL_Surface* sp = TTF_RenderUTF8_Blended_Wrapped(g_font, par, (SDL_Color) { 240, 240, 240, 255 }, 760);
+        if (sp) {
+            SDL_Texture* tp = SDL_CreateTextureFromSurface(g_renderer, sp);
+            SDL_Rect dst = { (LARG - 760) / 2, 120, 760, sp->h };
+            SDL_FreeSurface(sp);
+            if (tp) { SDL_RenderCopy(g_renderer, tp, NULL, &dst); SDL_DestroyTexture(tp); }
+        }
+    }
+}
+
+/* ------------------- �udio (carregar / trocar / liberar) ------------------- */
+static void audio_load(void) {
+    g_music_menu = Mix_LoadMUS(ASSET_MUSICA_MENU);
+    if (!g_music_menu) SDL_Log("Aviso: falha ao carregar %s: %s", ASSET_MUSICA_MENU, Mix_GetError());
+    g_music_tema[0] = Mix_LoadMUS(ASSET_MUSICA_AGUA);
+    if (!g_music_tema[0]) SDL_Log("Aviso: falha ao carregar %s: %s", ASSET_MUSICA_AGUA, Mix_GetError());
+    g_music_tema[1] = Mix_LoadMUS(ASSET_MUSICA_ENERGIA);
+    if (!g_music_tema[1]) SDL_Log("Aviso: falha ao carregar %s: %s", ASSET_MUSICA_ENERGIA, Mix_GetError());
+    g_music_tema[2] = Mix_LoadMUS(ASSET_MUSICA_MEIO);
+    if (!g_music_tema[2]) SDL_Log("Aviso: falha ao carregar %s: %s", ASSET_MUSICA_MEIO, Mix_GetError());
+    g_som_click = Mix_LoadWAV(ASSET_SOM_CLICK);
+    if (!g_som_click) SDL_Log("Aviso: falha ao carregar %s: %s", ASSET_SOM_CLICK, Mix_GetError());
+}
+
+/* libera audio */
+static void audio_free(void) {
+    if (g_music_menu) { Mix_FreeMusic(g_music_menu); g_music_menu = NULL; }
+    for (int i = 0; i < 3; ++i) { if (g_music_tema[i]) { Mix_FreeMusic(g_music_tema[i]); g_music_tema[i] = NULL; } }
+    if (g_som_click) { Mix_FreeChunk(g_som_click); g_som_click = NULL; }
+}
+
+/* troca m�sica conforme estado (apenas troca se diferente) */
+static void music_play_for_estado(Estado st) {
+    Mix_Music* next = NULL;
+    if (st == EST_TELA_INICIAL || st == EST_SELECAO_AVATAR || st == EST_MENU_TEMAS) next = g_music_menu;
+    else if (st == EST_TILE_AGUA) next = g_music_tema[0];
+    else if (st == EST_TILE_ENERGIA) next = g_music_tema[1];
+    else if (st == EST_TILE_MEIO) next = g_music_tema[2];
+
+    if (next != g_current_music) {
+        if (Mix_PlayingMusic()) Mix_HaltMusic();
+        g_current_music = next;
+        if (g_current_music) Mix_PlayMusic(g_current_music, -1); /* loop infinito */
+    }
+}
+
+/* ------------------- fade de transi��o simples ------------------- */
+static void fade_out_transition(void) {
+    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+    for (int a = 0; a <= 255; a += 8) {
+        SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, a);
+        SDL_Rect f = { 0,0,LARG,ALT };
+        SDL_RenderFillRect(g_renderer, &f);
+        SDL_RenderPresent(g_renderer);
+        SDL_Delay(12);
+    }
+}
+
+/* ------------------- rotina principal (main) ------------------- */
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+
+    /* inicializa SDL video e audio */
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
+        fprintf(stderr, "SDL_Init erro: %s\n", SDL_GetError());
+        return 1;
+    }
+    /* inicializa subsistemas */
+    if (!(IMG_Init(IMG_INIT_PNG) & IMG_INIT_PNG)) {
+        SDL_Log("Aviso: IMG_Init falhou: %s", IMG_GetError());
+    }
+    if (TTF_Init() != 0) {
+        SDL_Log("Aviso: TTF_Init falhou: %s", TTF_GetError());
+    }
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0) {
+        SDL_Log("Aviso: Mix_OpenAudio falhou: %s", Mix_GetError());
+    }
+
+    /* cria janela e renderer */
+    g_window = SDL_CreateWindow("Jogo Educativo - Sustentabilidade", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, LARG, ALT, 0);
+    if (!g_window) {
+        fprintf(stderr, "SDL_CreateWindow erro: %s\n", SDL_GetError());
+        goto cleanup_all;
+    }
+    g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!g_renderer) {
+        fprintf(stderr, "SDL_CreateRenderer erro: %s\n", SDL_GetError());
+        goto cleanup_all;
+    }
+
+    /* carrega fonte (tenta fallback) */
+    g_font = TTF_OpenFont(ASSET_FONT, 24);
+    if (!g_font) {
+        SDL_Log("Aviso: n�o abriu fonte %s (%s). Tentando fallback.", ASSET_FONT, TTF_GetError());
+        g_font = TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24);
+        if (!g_font) SDL_Log("Aviso: fallback da fonte tamb�m falhou.");
+    }
+
+    /* inicializa m�dulos (tiles, avatars, audio) */
+    tiles_init();
+    avatar_init();
+    audio_load();
+
+    /* reproduzir m�sica de menu inicialmente */
+    music_play_for_estado(EST_TELA_INICIAL);
+
+    /* estado inicial */
+    Estado estado = EST_TELA_INICIAL;
+    bool rodando = true;
+    SDL_Event evt;
+    Uint32 inicio = SDL_GetTicks();
+    const Uint32 DURACAO_TELA_INICIAL = 3000; /* ms */
+
+    /* loop principal */
+    while (rodando) {
+        /* eventos */
+        while (SDL_WaitEventTimeout(&evt, 16)) {
+            if (evt.type == SDL_QUIT) { rodando = false; break; }
+            if (evt.type == SDL_KEYDOWN) {
+                if (evt.key.keysym.sym == SDLK_ESCAPE) {
+                    /* comportamento da tecla ESC conforme estado */
+                    if (estado == EST_TILE_AGUA || estado == EST_TILE_ENERGIA || estado == EST_TILE_MEIO) {
+                        estado = EST_MENU_TEMAS;
+                        music_play_for_estado(estado);
+                    }
+                    else if (estado == EST_SELECAO_AVATAR) {
+                        /* ESC fecha a aplica��o na sele��o */
+                        rodando = false;
+                    }
+                    else if (estado == EST_MENU_TEMAS) {
+                        /* voltar para sele��o de avatar */
+                        estado = EST_SELECAO_AVATAR;
+                        music_play_for_estado(estado);
+                    }
+                    else {
+                        rodando = false;
+                    }
+                }
+            }
+            if (evt.type == SDL_MOUSEMOTION) {
+                /* nada para hover por enquanto */
+            }
+            if (evt.type == SDL_MOUSEBUTTONDOWN) {
+                int mx = evt.button.x;
+                int my = evt.button.y;
+                if (estado == EST_TELA_INICIAL) {
+                    /* qualquer clique avan�a para sele��o avatar */
+                    if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                    estado = EST_SELECAO_AVATAR;
+                    music_play_for_estado(estado);
+                }
+                else if (estado == EST_SELECAO_AVATAR) {
+                    /* clique nos avatares */
+                    avatar_on_click(mx, my);
+                    /* clique no bot�o seguir */
+                    if (dentro(&r_btn_seguinte, mx, my)) {
+                        if (g_avatar_escolhido >= 0) {
+                            /* transi��o com fade e vai ao menu de temas */
+                            if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                            fade_out_transition();
+                            estado = EST_MENU_TEMAS;
+                            music_play_for_estado(estado);
+                        }
+                        else {
+                            /* feedback: piscar bot�o */
+                            SDL_SetRenderDrawColor(g_renderer, 200, 50, 50, 255);
+                            SDL_RenderFillRect(g_renderer, &r_btn_seguinte);
+                            SDL_RenderPresent(g_renderer);
+                            SDL_Delay(120);
+                        }
+                    }
+                }
+                else if (estado == EST_MENU_TEMAS) {
+                    /* bot�o voltar (na tela de temas retorna para sele��o) */
+                    if (dentro(&r_btn_voltar, mx, my)) {
+                        if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                        estado = EST_SELECAO_AVATAR;
+                        music_play_for_estado(estado);
+                        continue;
+                    }
+                    /* escolha do tema */
+                    if (dentro(&r_btn_tema_agua, mx, my)) {
+                        if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                        estado = EST_TILE_AGUA;
+                        music_play_for_estado(estado);
+                        continue;
+                    }
+                    if (dentro(&r_btn_tema_energia, mx, my)) {
+                        if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                        estado = EST_TILE_ENERGIA;
+                        music_play_for_estado(estado);
+                        continue;
+                    }
+                    if (dentro(&r_btn_tema_meio, mx, my)) {
+                        if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                        estado = EST_TILE_MEIO;
+                        music_play_for_estado(estado);
+                        continue;
+                    }
+                }
+                else if (estado == EST_TILE_AGUA || estado == EST_TILE_ENERGIA || estado == EST_TILE_MEIO) {
+                    /* bot�o voltar na tela de tema volta ao menu de temas */
+                    if (dentro(&r_btn_voltar, mx, my)) {
+                        if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                        estado = EST_MENU_TEMAS;
+                        music_play_for_estado(estado);
+                        continue;
+                    }
+                }
+            }
+        } /* fim processamento eventos */
+
+        /* timeout da tela inicial: passa automaticamente para sele��o de avatar */
+        if (estado == EST_TELA_INICIAL && SDL_GetTicks() - inicio > DURACAO_TELA_INICIAL) {
+            estado = EST_SELECAO_AVATAR;
+            music_play_for_estado(estado);
+        }
+
+        /* ---------- render por estado ---------- */
+        if (estado == EST_TELA_INICIAL) {
+            tiles_render_menu_bg();
+            /* desenha textos centrais */
+            if (g_font) {
+                SDL_Color verde = { 0,200,0,255 };
+                SDL_Surface* st = TTF_RenderUTF8_Blended(g_font, "Jogo da Sustentabilidade", verde);
+                if (st) {
+                    SDL_Texture* tt = SDL_CreateTextureFromSurface(g_renderer, st);
+                    SDL_Rect dst = { (LARG - st->w) / 2, 200, st->w, st->h };
+                    SDL_FreeSurface(st);
+                    if (tt) { SDL_RenderCopy(g_renderer, tt, NULL, &dst); SDL_DestroyTexture(tt); }
+                }
+                SDL_Surface* s2 = TTF_RenderUTF8_Blended(g_font, "Clique para continuar", (SDL_Color) { 200, 200, 200, 255 });
+                if (s2) {
+                    SDL_Texture* t2 = SDL_CreateTextureFromSurface(g_renderer, s2);
+                    SDL_Rect dst = { (LARG - s2->w) / 2, 260, s2->w, s2->h };
+                    SDL_FreeSurface(s2);
+                    if (t2) { SDL_RenderCopy(g_renderer, t2, NULL, &dst); SDL_DestroyTexture(t2); }
+                }
+            }
+            SDL_RenderPresent(g_renderer);
+            SDL_Delay(16);
+            continue;
+        }
+        else if (estado == EST_SELECAO_AVATAR) {
+            tiles_render_menu_bg();
+            /* t�tulo */
+            if (g_font) {
+                SDL_Surface* s = TTF_RenderUTF8_Blended(g_font, "Escolha um avatar", (SDL_Color) { 255, 255, 255, 255 });
+                if (s) {
+                    SDL_Texture* t = SDL_CreateTextureFromSurface(g_renderer, s);
+                    SDL_Rect dst = { (LARG - s->w) / 2, 150, s->w, s->h };
+                    SDL_FreeSurface(s);
+                    if (t) { SDL_RenderCopy(g_renderer, t, NULL, &dst); SDL_DestroyTexture(t); }
+                }
+            }
+            /* render dos avatares */
+            avatar_render();
+            /* desenho do bot�o "Seguinte": usa textura se existir, sen�o fallback */
+            if (g_btn_seguinte_tex) {
+                SDL_RenderCopy(g_renderer, g_btn_seguinte_tex, NULL, &r_btn_seguinte);
+            }
+            else {
+                draw_button_rect_text(&r_btn_seguinte, "Seguinte");
+            }
+            SDL_RenderPresent(g_renderer);
+            SDL_Delay(16);
+            continue;
+        }
+        else if (estado == EST_MENU_TEMAS) {
+            tiles_render_menu_bg();
+            /* t�tulo */
+            if (g_font) {
+                SDL_Surface* s = TTF_RenderUTF8_Blended(g_font, "Escolha um tema:", (SDL_Color) { 255, 255, 255, 255 });
+                if (s) {
+                    SDL_Texture* t = SDL_CreateTextureFromSurface(g_renderer, s);
+                    SDL_Rect dst = { (LARG - s->w) / 2, 80, s->w, s->h };
+                    SDL_FreeSurface(s);
+                    if (t) { SDL_RenderCopy(g_renderer, t, NULL, &dst); SDL_DestroyTexture(t); }
+                }
+            }
+            /* bot�es tem�ticos */
+            draw_button_rect_text(&r_btn_tema_agua, "�gua");
+            draw_button_rect_text(&r_btn_tema_energia, "Energia");
+            draw_button_rect_text(&r_btn_tema_meio, "Meio Ambiente");
+            /* bot�o voltar no canto inferior direito (pedido) */
+            if (g_btn_voltar_tex) {
+                SDL_RenderCopy(g_renderer, g_btn_voltar_tex, NULL, &r_btn_voltar);
+            }
+            else {
+                draw_button_rect_text(&r_btn_voltar, "Voltar");
+            }
+            /* mostra avatar escolhido no canto superior esquerdo, se houver */
+            draw_selected_avatar_top_left();
+            SDL_RenderPresent(g_renderer);
+            SDL_Delay(16);
+            continue;
+        }
+        else if (estado == EST_TILE_AGUA || estado == EST_TILE_ENERGIA || estado == EST_TILE_MEIO) {
+            int tema = (estado == EST_TILE_AGUA) ? 0 : (estado == EST_TILE_ENERGIA) ? 1 : 2;
+            tiles_render_tema(tema);
+            /* bot�o voltar no canto inferior direito */
+            if (g_btn_voltar_tex) SDL_RenderCopy(g_renderer, g_btn_voltar_tex, NULL, &r_btn_voltar);
+            else draw_button_rect_text(&r_btn_voltar, "Voltar");
+            /* sempre mostrar avatar escolhido no canto superior esquerdo */
+            draw_selected_avatar_top_left();
+            SDL_RenderPresent(g_renderer);
+            SDL_Delay(16);
+            continue;
+        }
+
+        SDL_Delay(8);
+    } /* fim loop principal */
+
+    /* liberta recursos */
+    audio_free();
+    tiles_destroy();
+    avatar_destroy();
+    if (g_font) TTF_CloseFont(g_font);
+    if (g_renderer) SDL_DestroyRenderer(g_renderer);
+    if (g_window) SDL_DestroyWindow(g_window);
+
+cleanup_all:
+    Mix_CloseAudio();
+    TTF_Quit();
+    IMG_Quit();
+    SDL_Quit();
+    return 0;
+}
