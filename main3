@@ -1,7 +1,7 @@
-/* game.c - Jogo Educativo de Sustentabilidade (arquivo �nico)
-   M�dulos integrados: avatar, menu, tiles, �udio.
-   Coment�rios did�ticos linha-a-linha em portugu�s.
-   Requisitos de compila��o: SDL2, SDL2_image, SDL2_ttf, SDL2_mixer.
+/* Jogo Educativo de Sustentabilidade em SDL2
+ Adaptação do jogo educativo da professora/pedagoga Silvia
+Reposicionamento do botão voltar;
+Implementação do avatar escolhido nas páginas dos temas
 */
 
 #include <SDL2/SDL.h>
