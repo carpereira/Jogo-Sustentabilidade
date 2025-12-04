@@ -841,19 +841,6 @@ int main(int argc, char** argv) {
     Uint32 inicio = SDL_GetTicks();
     const Uint32 DURACAO_TELA_INICIAL = 3000; /* ms */
 
-    /* Nota: O loop principal e o restante render serão entregues na Parte 3/4 e Parte 4/4. */
-    /* Fim da Parte 2/4 */
-    /* Próximo: Parte 3/4 incluirá o loop principal completo, tratamento de eventos e render por estado. */
-    /* Para evitar duplicação, o restante do main() continua nas partes seguintes. */
-
-    /* Aguarda continuação nas próximas partes... */
-
-    /* --- colocar um return provisório para permitir compilação parcial ao colar só esta parte
-       (remover/editar quando juntar todas as partes) --- */
-    /* return 0; */
-
-    /* ---------------------- LOOP PRINCIPAL ---------------------- */
-
     while (rodando) {
 
         /* ---------------------- EVENTOS ---------------------- */
