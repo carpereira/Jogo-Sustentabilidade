@@ -1,0 +1,1243 @@
+/* Jogo Educativo de Sustentabilidade em SDL2
+   Adaptação do jogo educativo da professora/pedagoga Silvia
+   Implementação de quiz sobre os temas: água, energia e meio ambiente
+   Implementado tiles nas telas dos quizes
+   Implementação de animação do avatar vencedor
+   Implementação de animação do avatar em caso de resposta certa
+*/
+
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
+#include <SDL2/SDL_mixer.h>
+#include <SDL2/SDL_ttf.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+/* ------------------- configurações e caminhos ------------------- */
+#define LARG 1000                           /* largura da janela */
+#define ALT 600                             /* altura da janela */
+
+static const char* ASSET_TILE_MENU = "assets/tile_menu.png";            /* fundo do menu */
+static const char* ASSET_AVA[4] = {                                      /* avatares */
+    "assets/ava1.png", "assets/ava2.png", "assets/ava3.png", "assets/ava4.png"
+};
+static const char* ASSET_TILE_TEMA[3] = {                                /* tiles dos temas */
+    "assets/tile_agua.png", "assets/tile_energia.png", "assets/tile_meioambiente.png"
+};
+static const char* ASSET_BOTAO_SEGUINTE = "assets/botao_seguinte.png";   /* botão seguinte (opcional) */
+static const char* ASSET_BOTAO_VOLTAR = "assets/botao_voltar.png";       /* botão voltar (utilizado) */
+static const char* ASSET_MUSICA_MENU = "assets/menu.ogg";               /* musica menu */
+static const char* ASSET_MUSICA_AGUA = "assets/agua.mp3";               /* musica agua */
+static const char* ASSET_MUSICA_ENERGIA = "assets/energia.mp3";         /* musica energia */
+static const char* ASSET_MUSICA_MEIO = "assets/meioambiente.mp3";       /* musica meio */
+static const char* ASSET_SOM_CLICK = "assets/click.wav";                /* som de clique */
+static const char* ASSET_FONT = "assets/DejaVuSans.ttf";                /* fonte TTF */
+
+/* ------------------- tipos e estados do jogo ------------------- */
+/* estados principais do fluxo do jogo */
+typedef enum {
+    EST_TELA_INICIAL = 0,      /* tela de abertura */
+    EST_SELECAO_AVATAR,        /* escolher avatar */
+    EST_MENU_TEMAS,            /* escolher tema (agua/energia/meio) */
+    EST_TILE_AGUA,             /* tela do tema água -> inicia quiz */
+    EST_TILE_ENERGIA,         /* tela do tema energia -> inicia quiz */
+    EST_TILE_MEIO,            /* tela do tema meio ambiente -> inicia quiz */
+    EST_ANIMACAO_AVATAR,      /* estado opcional para animação (pode-se renderizar dentro do tema) */
+    EST_SAIR
+} Estado;
+
+/* estrutura do avatar (textura, retângulo, estado de seleção, escala) */
+typedef struct {
+    SDL_Texture* tex;
+    SDL_Rect rect;
+    int selected;
+    float scale;
+} Avatar;
+
+/* ------------------- variáveis globais (simples) ------------------- */
+static SDL_Window* g_window = NULL;
+static SDL_Renderer* g_renderer = NULL;
+static TTF_Font* g_font = NULL;
+/* texturas principais */
+static SDL_Texture* g_tile_menu = NULL;
+static SDL_Texture* g_tile_tema[3] = { NULL, NULL, NULL };
+static SDL_Texture* g_btn_seguinte_tex = NULL;
+static SDL_Texture* g_btn_voltar_tex = NULL;
+/* avatares */
+#define AVA_COUNT 4
+static Avatar g_avatars[AVA_COUNT];
+/* áudio */
+static Mix_Music* g_music_menu = NULL;
+static Mix_Music* g_music_tema[3] = { NULL, NULL, NULL };
+static Mix_Chunk* g_som_click = NULL;
+static Mix_Music* g_current_music = NULL;
+/* botões (retângulos usados para áreas clicáveis) */
+static SDL_Rect r_btn_seguinte = { LARG - 220, ALT - 120, 200, 90 };  /* botão seguir na seleção */
+static SDL_Rect r_btn_tema_agua = { 100, 420, 200, 80 };
+static SDL_Rect r_btn_tema_energia = { 400, 420, 200, 80 };
+static SDL_Rect r_btn_tema_meio = { 700, 420, 200, 80 };
+/* botão voltar posicionado no canto inferior direito (pedido) */
+static SDL_Rect r_btn_voltar = { LARG - 180, ALT - 80, 160, 60 };
+/* variável que guarda qual avatar foi escolhido (índice), -1 = nenhum */
+static int g_avatar_escolhido = -1;
+
+/* ------------------- variáveis para animação do avatar ------------------- */
+/* controla a animação especial quando o jogador pontua >= 5 */
+static bool anim_avatar_ativa = false;
+static int anim_avatar_contagem = 0;    /* quantos saltos já realizados */
+static Uint32 anim_avatar_t0 = 0;       /* tempo do último sub-frame */
+static SDL_Rect anim_avatar_rect = {0,0,0,0}; /* rect do avatar animado no centro */
+static int anim_avatar_phase = 0;       /* fase do ciclo: 0=idle,1=abaixar,2=subir,3=retorno */
+static int anim_avatar_total_saltos = 5;/* saltos desejados */
+/* animação do avatar no canto súperior esquerdo*/
+static bool anim_top_esq_ativa = false;
+static int anim_top_esq_phase = 0;
+static Uint32 anim_top_esq_t0 = 0;
+static SDL_Rect anim_top_esq_rect = { 16, 16,64,64 };
+
+/* ------------------- utilitários pequenos ------------------- */
+/* carrega textura a partir de ficheiro (retorna NULL em erro) */
+static SDL_Texture* carregar_textura_safe(const char* caminho) {
+    if (!caminho) return NULL;
+    SDL_Surface* s = IMG_Load(caminho);
+    if (!s) {
+        SDL_Log("Aviso: IMG_Load('%s') falhou: %s", caminho, IMG_GetError());
+        return NULL;
+    }
+    SDL_Texture* t = SDL_CreateTextureFromSurface(g_renderer, s);
+    SDL_FreeSurface(s);
+    return t;
+}
+
+/* desenha texto simples (cria textura temporária) */
+static void desenhar_texto(const char* msg, int x, int y) {
+    if (!g_font || !msg) return;
+    SDL_Color branco = { 255, 255, 255, 255 };
+    SDL_Surface* s = TTF_RenderUTF8_Blended(g_font, msg, branco);
+    if (!s) return;
+    SDL_Texture* t = SDL_CreateTextureFromSurface(g_renderer, s);
+    if (t) {
+        SDL_Rect dst = { x, y, s->w, s->h };
+        SDL_RenderCopy(g_renderer, t, NULL, &dst);
+        SDL_DestroyTexture(t);
+    }
+    SDL_FreeSurface(s);
+}
+
+/* returna 1 se ponto (x,y) estiver dentro do rect r */
+static int dentro(const SDL_Rect* r, int x, int y) {
+    return (x >= r->x && x <= r->x + r->w && y >= r->y && y <= r->y + r->h);
+}
+
+/* desenha botão retangular com texto (hover não implementado visualmente aqui) */
+static void draw_button_rect_text(const SDL_Rect* r, const char* txt) {
+    /* corpo do botão */
+    SDL_SetRenderDrawColor(g_renderer, 20, 110, 80, 255);
+    SDL_RenderFillRect(g_renderer, r);
+    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+    SDL_RenderDrawRect(g_renderer, r);
+    /* texto centralizado */
+    if (g_font && txt) {
+        SDL_Color branco = { 255,255,255,255 };
+        SDL_Surface* s = TTF_RenderUTF8_Blended(g_font, txt, branco);
+        if (s) {
+            SDL_Texture* t = SDL_CreateTextureFromSurface(g_renderer, s);
+            if (t) {
+                SDL_Rect dst = { r->x + (r->w - s->w) / 2, r->y + (r->h - s->h) / 2, s->w, s->h };
+                SDL_RenderCopy(g_renderer, t, NULL, &dst);
+                SDL_DestroyTexture(t);
+            }
+            SDL_FreeSurface(s);
+        }
+    }
+}
+
+/* ------------------- avatar: init / render / click ------------------- */
+/* inicia avatares: carrega texturas, define posições e tamanhos reduzidos (metade) */
+static void avatar_init(void) {
+    int base_x = 120;
+    int gap = 200;
+    for (int i = 0; i < AVA_COUNT; ++i) {
+        g_avatars[i].tex = carregar_textura_safe(ASSET_AVA[i]);
+        g_avatars[i].rect.x = base_x + i * gap;
+        g_avatars[i].rect.y = 240;
+        g_avatars[i].rect.w = 150 / 2;  /* metade conforme solicitado */
+        g_avatars[i].rect.h = 150 / 2;
+        g_avatars[i].selected = 0;
+        g_avatars[i].scale = 1.0f;
+    }
+}
+
+/* destrói texturas de avatar */
+static void avatar_destroy(void) {
+    for (int i = 0; i < AVA_COUNT; ++i) {
+        if (g_avatars[i].tex) { SDL_DestroyTexture(g_avatars[i].tex); g_avatars[i].tex = NULL; }
+    }
+}
+
+/* trata clique nos avatares: seleciona e toca som */
+static void avatar_on_click(int mx, int my) {
+    for (int i = 0; i < AVA_COUNT; ++i) {
+        if (dentro(&g_avatars[i].rect, mx, my)) {
+            /* tocar som se existir */
+            if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+            /* resetar seleção anterior */
+            for (int j = 0; j < AVA_COUNT; ++j) { g_avatars[j].selected = 0; g_avatars[j].scale = 1.0f; }
+            /* marcar este */
+            g_avatars[i].selected = 1;
+            g_avatars[i].scale = 1.4f;
+            g_avatar_escolhido = i;
+            SDL_Log("Avatar escolhido: %d", i);
+            return;
+        }
+    }
+}
+
+/* renderiza os avatares (com crescimento quando selecionado) */
+static void avatar_render(void) {
+    for (int i = 0; i < AVA_COUNT; ++i) {
+        SDL_Rect dst = g_avatars[i].rect;
+        if (g_avatars[i].selected) {
+            dst.w = (int)(dst.w * g_avatars[i].scale);
+            dst.h = (int)(dst.h * g_avatars[i].scale);
+            dst.x = g_avatars[i].rect.x - (dst.w - g_avatars[i].rect.w) / 2;
+            dst.y = g_avatars[i].rect.y - (dst.h - g_avatars[i].rect.h) / 2;
+        }
+        if (g_avatars[i].tex) SDL_RenderCopy(g_renderer, g_avatars[i].tex, NULL, &dst);
+        else {
+            /* fallback visual se textura não existe */
+            SDL_SetRenderDrawColor(g_renderer, 120 + i * 20, 100 + i * 10, 140 + i * 5, 255);
+            SDL_RenderFillRect(g_renderer, &dst);
+            SDL_SetRenderDrawColor(g_renderer, 255, 255, 255, 255);
+            SDL_RenderDrawRect(g_renderer, &dst);
+        }
+    }
+}
+
+/* desenha avatar escolhido no canto superior esquerdo (pedido) */
+static void draw_selected_avatar_top_left(void) {
+    if (g_avatar_escolhido < 0) return;
+
+    SDL_Rect dst = { 16, 16, 64, 64 };
+
+    /* se a animação pequena estiver ativa, ela será desenhada acima */
+    if (!anim_top_esq_ativa) {
+        if (g_avatars[g_avatar_escolhido].tex) {
+            SDL_RenderCopy(g_renderer, g_avatars[g_avatar_escolhido].tex, NULL, &dst);
+        } else {
+            SDL_SetRenderDrawColor(g_renderer, 200, 200, 200, 255);
+            SDL_RenderFillRect(g_renderer, &dst);
+        }
+    }
+}
+
+
+/* ------------------- tiles (menu e temas) ------------------- */
+/* inicializa tiles: menu e tiles por tema */
+static void tiles_init(void) {
+    g_tile_menu = carregar_textura_safe(ASSET_TILE_MENU);
+    for (int i = 0; i < 3; ++i) {
+        g_tile_tema[i] = carregar_textura_safe(ASSET_TILE_TEMA[i]);
+    }
+    g_btn_seguinte_tex = carregar_textura_safe(ASSET_BOTAO_SEGUINTE);
+    g_btn_voltar_tex = carregar_textura_safe(ASSET_BOTAO_VOLTAR);
+}
+
+/* destrói texturas de tiles */
+static void tiles_destroy(void) {
+    if (g_tile_menu) { SDL_DestroyTexture(g_tile_menu); g_tile_menu = NULL; }
+    for (int i = 0; i < 3; ++i) { if (g_tile_tema[i]) { SDL_DestroyTexture(g_tile_tema[i]); g_tile_tema[i] = NULL; } }
+    if (g_btn_seguinte_tex) { SDL_DestroyTexture(g_btn_seguinte_tex); g_btn_seguinte_tex = NULL; }
+    if (g_btn_voltar_tex) { SDL_DestroyTexture(g_btn_voltar_tex); g_btn_voltar_tex = NULL; }
+}
+
+/* render menu (tile de fundo ou fallback) */
+static void tiles_render_menu_bg(void) {
+    if (g_tile_menu) {
+        SDL_Rect f = { 0, 0, LARG, ALT };
+        SDL_RenderCopy(g_renderer, g_tile_menu, NULL, &f);
+    }
+    else {
+        SDL_SetRenderDrawColor(g_renderer, 20, 30, 50, 255);
+        SDL_RenderClear(g_renderer);
+    }
+}
+
+/* render tela de tema (usa tile do tema se existir, e texto) */
+static void tiles_render_tema(int tema) {
+    if (tema >= 0 && tema < 3 && g_tile_tema[tema]) {
+        SDL_Rect f = { 0, 0, LARG, ALT };
+        SDL_RenderCopy(g_renderer, g_tile_tema[tema], NULL, &f);
+    }
+    else {
+        if (tema == 0) SDL_SetRenderDrawColor(g_renderer, 50, 130, 200, 255);
+        else if (tema == 1) SDL_SetRenderDrawColor(g_renderer, 200, 160, 60, 255);
+        else SDL_SetRenderDrawColor(g_renderer, 80, 160, 80, 255);
+        SDL_Rect f = { 0,0,LARG,ALT };
+        SDL_RenderFillRect(g_renderer, &f);
+    }
+    /* título e parágrafo */
+    if (g_font) {
+        const char* titulo = (tema == 0) ? "Tema: Água" : (tema == 1) ? "Tema: Energia" : "Tema: Meio Ambiente";
+        SDL_Color verde = { 0,200,0,255 };
+        SDL_Surface* st = TTF_RenderUTF8_Blended(g_font, titulo, verde);
+        if (st) {
+            SDL_Texture* tt = SDL_CreateTextureFromSurface(g_renderer, st);
+            SDL_Rect dst = { (LARG - st->w) / 2, 40, st->w, st->h };
+            SDL_FreeSurface(st);
+            if (tt) { SDL_RenderCopy(g_renderer, tt, NULL, &dst); SDL_DestroyTexture(tt); }
+        }
+    }
+}
+
+/* ------------------- áudio (carregar / trocar / liberar) ------------------- */
+static void audio_load(void) {
+    g_music_menu = Mix_LoadMUS(ASSET_MUSICA_MENU);
+    if (!g_music_menu) SDL_Log("Aviso: falha ao carregar %s: %s", ASSET_MUSICA_MENU, Mix_GetError());
+    g_music_tema[0] = Mix_LoadMUS(ASSET_MUSICA_AGUA);
+    if (!g_music_tema[0]) SDL_Log("Aviso: falha ao carregar %s: %s", ASSET_MUSICA_AGUA, Mix_GetError());
+    g_music_tema[1] = Mix_LoadMUS(ASSET_MUSICA_ENERGIA);
+    if (!g_music_tema[1]) SDL_Log("Aviso: falha ao carregar %s: %s", ASSET_MUSICA_ENERGIA, Mix_GetError());
+    g_music_tema[2] = Mix_LoadMUS(ASSET_MUSICA_MEIO);
+    if (!g_music_tema[2]) SDL_Log("Aviso: falha ao carregar %s: %s", ASSET_MUSICA_MEIO, Mix_GetError());
+    g_som_click = Mix_LoadWAV(ASSET_SOM_CLICK);
+    if (!g_som_click) SDL_Log("Aviso: falha ao carregar %s: %s", ASSET_SOM_CLICK, Mix_GetError());
+}
+
+/* libera audio */
+static void audio_free(void) {
+    if (g_music_menu) { Mix_FreeMusic(g_music_menu); g_music_menu = NULL; }
+    for (int i = 0; i < 3; ++i) { if (g_music_tema[i]) { Mix_FreeMusic(g_music_tema[i]); g_music_tema[i] = NULL; } }
+    if (g_som_click) { Mix_FreeChunk(g_som_click); g_som_click = NULL; }
+}
+
+/* troca música conforme estado (apenas troca se diferente) */
+static void music_play_for_estado(Estado st) {
+    Mix_Music* next = NULL;
+    if (st == EST_TELA_INICIAL || st == EST_SELECAO_AVATAR || st == EST_MENU_TEMAS) next = g_music_menu;
+    else if (st == EST_TILE_AGUA) next = g_music_tema[0];
+    else if (st == EST_TILE_ENERGIA) next = g_music_tema[1];
+    else if (st == EST_TILE_MEIO) next = g_music_tema[2];
+
+    if (next != g_current_music) {
+        if (Mix_PlayingMusic()) Mix_HaltMusic();
+        g_current_music = next;
+        if (g_current_music) Mix_PlayMusic(g_current_music, -1); /* loop infinito */
+    }
+}
+
+/* ------------------- fade de transição simples ------------------- */
+static void fade_out_transition(void) {
+    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+    for (int a = 0; a <= 255; a += 8) {
+        SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, a);
+        SDL_Rect f = { 0,0,LARG,ALT };
+        SDL_RenderFillRect(g_renderer, &f);
+        SDL_RenderPresent(g_renderer);
+        SDL_Delay(12);
+    }
+}
+
+/* ------------------- sistema de QUIZ ------------------- */
+
+#define QUIZ_TOTAL 40         /* 40 perguntas por tema */
+#define QUIZ_SELECAO 10       /* escolhe 10 por partida */
+#define QUIZ_HIST 5           /* não repetir nas últimas 5 execuções */
+
+/* banco de perguntas */
+typedef struct {
+    const char* pergunta;
+    const char* opA;
+    const char* opB;
+    const char* opC;
+    char correta;  /* 'A', 'B' ou 'C' -> valor base, mas será substituído por sorteio de partida */
+} QuizPerg;
+
+/* perguntas por tema: 0=água, 1=energia, 2=meio ambiente */
+static QuizPerg quiz_banco[3][QUIZ_TOTAL];
+
+/* histórico circular para evitar repetição */
+static int quiz_hist[3][QUIZ_HIST][QUIZ_SELECAO];
+static int quiz_hist_pos[3] = { 0,0,0 };
+
+/* perguntas escolhidas para a partida atual */
+static int quiz_sorteio[QUIZ_SELECAO];
+
+/* estado do quiz em execução */
+static int quiz_tema_atual = -1;
+static int quiz_qindex = 0;        /* índice 0..QUIZ_SELECAO-1 da questão atual */
+static int quiz_score = 0;
+static bool quiz_ativo = false;
+
+/* botões de respostas (três opções) */
+static SDL_Rect r_btn_opA = { 120, 300, 760, 60 };
+static SDL_Rect r_btn_opB = { 120, 380, 760, 60 };
+static SDL_Rect r_btn_opC = { 120, 460, 760, 60 };
+
+/* ==== VARIÁVEL: correta aleatória por pergunta escolhida ==== */
+/* para cada pergunta sorteada na partida, guarda qual letra (A/B/C) é a correta */
+static char quiz_random_correta[QUIZ_SELECAO];
+/* ============================================================ */
+
+/* inicializa o banco de perguntas (linha-a-linha) */
+static void quiz_init_banco(void) {
+    /* TEMA 0 - ÁGUA (40 perguntas) - infantil */
+    quiz_banco[0][0] = (QuizPerg){ "Por que devemos economizar água?", "A) Para ajudar a natureza", "B) Para colorir a água", "C) Para ficar na chuva", 'A' };
+    quiz_banco[0][1] = (QuizPerg){ "Onde encontramos água na natureza?", "A) Em rios e lagos", "B) Em pedras", "C) Em nuvens feitas de algodão", 'A' };
+    quiz_banco[0][2] = (QuizPerg){ "Por que fechar a torneira ao escovar os dentes?", "A) Para não desperdiçar água", "B) Para ter som", "C) Para ver a pia", 'A' };
+    quiz_banco[0][3] = (QuizPerg){ "Como poupar água no banho?", "A) Tomando banho rápido", "B) Cantando mais", "C) Lavar só com torneira aberta", 'A' };
+    quiz_banco[0][4] = (QuizPerg){ "O que não se deve jogar no rio?", "A) Lixo", "B) Flores", "C) Sementes", 'A' };
+    quiz_banco[0][5] = (QuizPerg){ "Para que usamos água em casa?", "A) Beber e lavar", "B) Pintar a parede", "C) Guardar brinquedos", 'A' };
+    quiz_banco[0][6] = (QuizPerg){ "O que é um vazamento?", "A) Quando a água escapa", "B) Quando a água fica feliz", "C) Quando a água some", 'A' };
+    quiz_banco[0][7] = (QuizPerg){ "Como evitar desperdício ao lavar a louça?", "A) Usar balde e pano", "B) Deixar a torneira aberta", "C) Lavar o prato na rua", 'A' };
+    quiz_banco[0][8] = (QuizPerg){ "Por que devemos cuidar dos rios?", "A) Porque vivem peixes e animais", "B) Porque servem de pista", "C) Porque ficam coloridos", 'A' };
+    quiz_banco[0][9] = (QuizPerg){ "Qual é a água própria para beber?", "A) Potável (filtrada/tratada)", "B) Do mar", "C) De cor", 'A' };
+    quiz_banco[0][10] = (QuizPerg){ "O que é chuva?", "A) água que vem das nuvens", "B) Céu colorido", "C) Areia no ar", 'A' };
+    quiz_banco[0][11] = (QuizPerg){ "Por que plantas precisam de água?", "A) Para crescer", "B) Para dormir", "C) Para correr", 'A' };
+    quiz_banco[0][12] = (QuizPerg){ "Por que não jogar óleo no ralo?", "A) Entope e polui a água", "B) Melhora o sabor", "C) Faz mágica", 'A' };
+    quiz_banco[0][13] = (QuizPerg){ "Como guardar água da chuva ajuda?", "A) Serve para regar plantas", "B) Deixa a chuva presa", "C) Faz barulho", 'A' };
+    quiz_banco[0][14] = (QuizPerg){ "Qual é o estado sólido da água?", "A) Gelo", "B) Vapor", "C) Névoa", 'A' };
+    quiz_banco[0][15] = (QuizPerg){ "Quem precisa de água para viver?", "A) Plantas, animais e pessoas", "B) Só pessoas", "C) Só peixes", 'A' };
+    quiz_banco[0][16] = (QuizPerg){ "O que faz uma estação de tratamento?", "A) Deixa a água limpa", "B) Faz a água dançar", "C) Tira cor", 'A' };
+    quiz_banco[0][17] = (QuizPerg){ "Por que consertar um vazamento é importante?", "A) Evita desperdício", "B) Deixa a casa vazia", "C) Faz som", 'A' };
+    quiz_banco[0][18] = (QuizPerg){ "Qual é o ciclo da água?", "A) Evapora, vira nuvem e chove", "B) Cai e some", "C) Vive no chão", 'A' };
+    quiz_banco[0][19] = (QuizPerg){ "Como ajudar a conservar a água?", "A) Fechando torneiras e reaproveitando", "B) Jogando água no chão", "C) Abrindo tudo", 'A' };
+    quiz_banco[0][20] = (QuizPerg){ "O que é um aqüífero?", "A) Lugar onde a água fica no subsolo", "B) Lago de pedra", "C) Nuvem no chão", 'A' };
+    quiz_banco[0][21] = (QuizPerg){ "Qual cor tem a água limpa?", "A) Transparente", "B) Vermelha", "C) Verde", 'A' };
+    quiz_banco[0][22] = (QuizPerg){ "O que acontece com rios sujos?", "A) Animais podem morrer", "B) Ficam mais limpos", "C) Viram parque", 'A' };
+    quiz_banco[0][23] = (QuizPerg){ "Como usar água para jardim sem desperdiçar?", "A) Regar de manhã cedo", "B) Regar de noite toda", "C) Jogar com mangueira", 'A' };
+    quiz_banco[0][24] = (QuizPerg){ "Por que limpar caixa d'água?", "A) Para água ficar limpa", "B) Para guardar brinquedos", "C) Para enfeitar", 'A' };
+    quiz_banco[0][25] = (QuizPerg){ "O que é reuso de água cinza?", "A) Usar água de pias para regar", "B) Beber água suja", "C) Jogar água fora", 'A' };
+    quiz_banco[0][26] = (QuizPerg){ "Por que não misturar lixo com água?", "A) Porque polui e dificulta tratamento", "B) Porque fica divertido", "C) Porque vira chuva", 'A' };
+    quiz_banco[0][27] = (QuizPerg){ "Que animal vive na água?", "A) Peixe", "B) Cavalo", "C) Pássaro", 'A' };
+    quiz_banco[0][28] = (QuizPerg){ "O que fazer ao ver vazamento?", "A) Avisar um adulto", "B) Brincar na água", "C) Esperar a noite", 'A' };
+    quiz_banco[0][29] = (QuizPerg){ "Por que usar balde para lavar carro ajuda?", "A) Gasta menos água", "B) Faz espuma maior", "C) Deixa carro mais rápido", 'A' };
+    quiz_banco[0][30] = (QuizPerg){ "A água potável serve para:", "A) Beber sem fazer mal", "B) Pintar paredes", "C) Lavar sapatos", 'A' };
+    quiz_banco[0][31] = (QuizPerg){ "Como água ajuda no corpo?", "A) Hidrata e ajuda funções do corpo", "B) Faz crescer cabelo colorido", "C) Gera energia mágica", 'A' };
+    quiz_banco[0][32] = (QuizPerg){ "De onde vem a água da chuva?", "A) Do vapor que sobe e vira nuvem", "B) Da torneira do céu", "C) Das nuvens de algodão", 'A' };
+    quiz_banco[0][33] = (QuizPerg){ "O que causa falta de água em cidades?", "A) Uso errado e pouca chuva", "B) Mágica", "C) Porque a água decide ir embora", 'A' };
+    quiz_banco[0][34] = (QuizPerg){ "Como economizar água na lavagem de roupas?", "A) Encher a máquina com mais roupas corretamente", "B) Lavar peça por peça", "C) Deixar a torneira aberta", 'A' };
+    quiz_banco[0][35] = (QuizPerg){ "Quem cuida das nascentes ajuda a:", "A) Garantir água limpa no futuro", "B) Aumentar barulho", "C) Pintar árvores", 'A' };
+    quiz_banco[0][36] = (QuizPerg){ "O que é água salgada?", "A) água do mar", "B) água doce", "C) água limpa", 'A' };
+    quiz_banco[0][37] = (QuizPerg){ "Por que não beber água suja?", "A) Pode causar doença", "B) Dá asas", "C) Faz ver cores", 'A' };
+    quiz_banco[0][38] = (QuizPerg){ "Como evitar desperdício na cozinha?", "A) Usar panela do tamanho certo", "B) Lavar tudo com mangueira", "C) Jogar água fora", 'A' };
+    quiz_banco[0][39] = (QuizPerg){ "Quem é responsável por economizar água?", "A) Todas as pessoas", "B) Só o governo", "C) Só as plantas", 'A' };
+
+    /* TEMA 1 - ENERGIA (40 perguntas) - infantil */
+    quiz_banco[1][0] = (QuizPerg){ "Por que devemos economizar energia?", "A) Para cuidar do planeta", "B) Para ficar sempre no escuro", "C) Para ter barulho", 'A' };
+    quiz_banco[1][1] = (QuizPerg){ "O que fazer quando sair de um quarto?", "A) Apagar a luz", "B) Ligar mais aparelhos", "C) Deixar tudo ligado", 'A' };
+    quiz_banco[1][2] = (QuizPerg){ "Qual aparelho consome muita energia?", "A) Chuveiro elétrico", "B) lâmpada apagada", "C) Toalha", 'A' };
+    quiz_banco[1][3] = (QuizPerg){ "Qual energia vem do sol?", "A) Energia solar", "B) Energia da lua", "C) Energia do guarda-chuva", 'A' };
+    quiz_banco[1][4] = (QuizPerg){ "Por que não deixar TV ligada sem ninguém?", "A) Porque gasta energia", "B) Porque fica triste", "C) Porque cresce", 'A' };
+    quiz_banco[1][5] = (QuizPerg){ "Para que serve uma lâmpada?", "A) Para iluminar", "B) Para lavar roupa", "C) Para guardar água", 'A' };
+    quiz_banco[1][6] = (QuizPerg){ "O que é energia elétrica?", "A) Força que faz aparelhos funcionarem", "B) Um brinquedo novo", "C) Uma cor", 'A' };
+    quiz_banco[1][7] = (QuizPerg){ "Qual energia vem do vento?", "A) Energia eólica", "B) Energia da terra", "C) Energia da geladeira", 'A' };
+    quiz_banco[1][8] = (QuizPerg){ "Por que escolher lâmpada LED?", "A) Porque economiza energia", "B) Porque é pesada", "C) Porque tem cheiro", 'A' };
+    quiz_banco[1][9] = (QuizPerg){ "Qual atitude economiza energia?", "A) Desligar aparelhos não usados", "B) Ligar tudo ao mesmo tempo", "C) Abrir geladeira sempre", 'A' };
+    quiz_banco[1][10] = (QuizPerg){ "O que não se deve colocar na tomada?", "A) Objetos de metal", "B) Plugues", "C) Cabos elétricos corretos", 'A' };
+    quiz_banco[1][11] = (QuizPerg){ "Por que o sol é importante?", "A) Dá luz e calor", "B) Faz barulho", "C) Liga a TV", 'A' };
+    quiz_banco[1][12] = (QuizPerg){ "Como a bicicleta gera energia?", "A) Com a força do corpo", "B) Com eletricidade", "C) Com vento", 'A' };
+    quiz_banco[1][13] = (QuizPerg){ "Por que fechar a porta da geladeira?", "A) Para economizar energia", "B) Para fazer barulho", "C) Para entrar ar frio", 'A' };
+    quiz_banco[1][14] = (QuizPerg){ "Qual energia vem da água?", "A) Hidrelétrica", "B) Do fogo", "C) Do som", 'A' };
+    quiz_banco[1][15] = (QuizPerg){ "Qual lâmpada consome menos?", "A) LED", "B) Incandescente", "C) Queimada", 'A' };
+    quiz_banco[1][16] = (QuizPerg){ "Por que abrir janelas de dia?", "A) Para usar luz natural", "B) Para deixar escuro", "C) Para gastar energia", 'A' };
+    quiz_banco[1][17] = (QuizPerg){ "Para que serve um ventilador?", "A) Mexer o ar e refrescar", "B) Cozinhar", "C) Pintar paredes", 'A' };
+    quiz_banco[1][18] = (QuizPerg){ "Qual fonte é limpa?", "A) Solar", "B) Fumaça", "C) Lixo", 'A' };
+    quiz_banco[1][19] = (QuizPerg){ "O que acontece com luzes acesas sem necessidade?", "A) Gasta energia", "B) Limpa a casa", "C) Aumenta plantas", 'A' };
+    quiz_banco[1][20] = (QuizPerg){ "De onde vem energia hidrelétrica?", "A) Da água em movimento", "B) Do deserto", "C) Da areia", 'A' };
+    quiz_banco[1][21] = (QuizPerg){ "Como reduzir consumo em casa?", "A) Desligando o que não usa", "B) Ligando tudo", "C) Dormindo perto da tomada", 'A' };
+    quiz_banco[1][22] = (QuizPerg){ "O que é energia eólica?", "A) Energia do vento", "B) Energia da lua", "C) Energia da chuva", 'A' };
+    quiz_banco[1][23] = (QuizPerg){ "Por que economizar energia é importante?", "A) Para proteger o planeta", "B) Para deixar a casa vazia", "C) Para assustar aparelhos", 'A' };
+    quiz_banco[1][24] = (QuizPerg){ "Qual aparelho usar com moderação?", "A) Ar-condicionado", "B) Bola", "C) Caneta", 'A' };
+    quiz_banco[1][25] = (QuizPerg){ "Como usar menos energia elétrica?", "A) Aproveitar luz do dia", "B) Deixar lâmpadas acesas sempre", "C) Ligar coisas desnecessárias", 'A' };
+    quiz_banco[1][26] = (QuizPerg){ "Para que serve energia elétrica?", "A) Fazer aparelhos funcionarem", "B) Pintar céu", "C) Criar chuva", 'A' };
+    quiz_banco[1][27] = (QuizPerg){ "Ao carregar celular, o que fazer depois?", "A) Desconectar quando cheio", "B) Deixar conectado sempre", "C) Colocar dentro da geladeira", 'A' };
+    quiz_banco[1][28] = (QuizPerg){ "Qual energia vem do calor do planeta?", "A) Geotérmica", "B) Fantasma", "C) Colorida", 'A' };
+    quiz_banco[1][29] = (QuizPerg){ "Quando acender lâmpadas?", "A) Só quando precisar", "B) Sempre", "C) Nunca", 'A' };
+    quiz_banco[1][30] = (QuizPerg){ "O que é energia renovável?", "A) Energia que não se esgota facilmente", "B) Energia que some", "C) Energia feita de plástico", 'A' };
+    quiz_banco[1][31] = (QuizPerg){ "Como evitar acidentes elétricos?", "A) não mexer em fios", "B) Colocar metal na tomada", "C) Molhar cabos", 'A' };
+    quiz_banco[1][32] = (QuizPerg){ "Por que aparelhos eficientes são bons?", "A) Gastam menos energia", "B) Fazem barulho", "C) são grandes", 'A' };
+    quiz_banco[1][33] = (QuizPerg){ "O que acontece se o ferro fica ligado?", "A) Pode queimar e gasta energia", "B) Esfria a casa", "C) Faz comida sozinho", 'A' };
+    quiz_banco[1][34] = (QuizPerg){ "O que usam painéis solares?", "A) Transformam luz do sol em eletricidade", "B) Fazem vento", "C) Guardam chuva", 'A' };
+    quiz_banco[1][35] = (QuizPerg){ "Como ajudar a economizar energia?", "A) Apagando luz quando sair", "B) Abrindo geladeira sem necessidade", "C) Ligando tudo sempre", 'A' };
+    quiz_banco[1][36] = (QuizPerg){ "Ao usar computador por muito tempo, o que fazer?", "A) Desligar ao terminar", "B) Deixar ligado sempre", "C) Colocar na banheira", 'A' };
+    quiz_banco[1][37] = (QuizPerg){ "Quem deve economizar energia?", "A) Todos", "B) Só crianças", "C) Só adultos", 'A' };
+    quiz_banco[1][38] = (QuizPerg){ "Por que energia é útil?", "A) Facilita atividades do dia a dia", "B) Faz chover sempre", "C) Muda a cor do céu", 'A' };
+    quiz_banco[1][39] = (QuizPerg){ "O que é termelétrica?", "A) Usina que gera energia queimando combustível", "B) Usina que faz vento", "C) Usina que faz chocolate", 'A' };
+
+    /* TEMA 2 - MEIO AMBIENTE (40 perguntas) - infantil */
+    quiz_banco[2][0] = (QuizPerg){ "Por que reciclar é bom?", "A) Porque reaproveita materiais", "B) Porque aumenta o lixo", "C) Porque some o planeta", 'A' };
+    quiz_banco[2][1] = (QuizPerg){ "O que devemos fazer com lixo reciclável?", "A) Separar em casa", "B) Jogar no rio", "C) Enterrar em casa", 'A' };
+    quiz_banco[2][2] = (QuizPerg){ "Por que plantar árvores ajuda?", "A) Porque elas capturam carbono e dão sombra", "B) Porque fazem chuva de brinquedos", "C) Porque mudam cor", 'A' };
+    quiz_banco[2][3] = (QuizPerg){ "O que é poluição?", "A) Sujar o ar, água ou solo", "B) Limpar tudo", "C) Semear flores", 'A' };
+    quiz_banco[2][4] = (QuizPerg){ "Como não prejudicar animais?", "A) não jogar lixo na natureza", "B) Acordá-los à noite", "C) Mexer nos ninhos", 'A' };
+    quiz_banco[2][5] = (QuizPerg){ "Por que evitar queimadas?", "A) Porque destrói florestas e bichos", "B) Porque cria casas", "C) Porque enfeita o céu", 'A' };
+    quiz_banco[2][6] = (QuizPerg){ "O que é biodiversidade?", "A) Muitas espécies diferentes", "B) Um único tipo de planta", "C) Só pessoas", 'A' };
+    quiz_banco[2][7] = (QuizPerg){ "Como poupar recursos naturais?", "A) Consumir menos e reciclar", "B) Usar tudo de uma vez", "C) Jogar fora", 'A' };
+    quiz_banco[2][8] = (QuizPerg){ "O que são áreas de preservação?", "A) Lugares protegidos para a natureza", "B) Parques de diversões", "C) Lixos grandes", 'A' };
+    quiz_banco[2][9] = (QuizPerg){ "Por que separar o lixo?", "A) Facilita reciclagem", "B) Faz mais cheiro", "C) Dificulta a coleta", 'A' };
+    quiz_banco[2][10] = (QuizPerg){ "O que é uma espécie invasora?", "A) Espécie que prejudica as nativas", "B) Espécie que ajuda a todo mundo", "C) Espécie imaginária", 'A' };
+    quiz_banco[2][11] = (QuizPerg){ "Como ajudar animais de rua?", "A) Ajudando com comida e abrigo", "B) Ignorando", "C) Assustando", 'A' };
+    quiz_banco[2][12] = (QuizPerg){ "Por que as abelhas são importantes?", "A) Porque polinizam plantas", "B) Porque fazem faxina", "C) Porque pintam flores", 'A' };
+    quiz_banco[2][13] = (QuizPerg){ "O que é desmatamento?", "A) Tirar árvores de um lugar", "B) Plantar árvores", "C) Limpar lixo", 'A' };
+    quiz_banco[2][14] = (QuizPerg){ "Como reduzir lixo em casa?", "A) Reutilizar e reciclar", "B) Jogar tudo fora", "C) Comprar mais plástico", 'A' };
+    quiz_banco[2][15] = (QuizPerg){ "Por que o plástico é ruim no mar?", "A) Porque machuca animais", "B) Porque vira alimento", "C) Porque dá cor", 'A' };
+    quiz_banco[2][16] = (QuizPerg){ "O que é um ecossistema?", "A) Seres vivos e ambiente interagindo", "B) Só árvores", "C) Só pedras", 'A' };
+    quiz_banco[2][17] = (QuizPerg){ "Como plantar uma árvore ajuda no clima?", "A) Absorve CO2 e dá sombra", "B) Aumenta barulho", "C) Tira água do ar", 'A' };
+    quiz_banco[2][18] = (QuizPerg){ "Por que não jogar óleo no ralo?", "A) Porque polui água e esgotos", "B) Porque cheira bem", "C) Porque some", 'A' };
+    quiz_banco[2][19] = (QuizPerg){ "Como economizar papel?", "A) Usando os dois lados", "B) Jogando tudo fora", "C) Escrevendo em pedras", 'A' };
+    quiz_banco[2][20] = (QuizPerg){ "O que é reciclar vidro?", "A) Transformar vidro velho em novo", "B) Jogar vidro no chão", "C) Queimar vidro", 'A' };
+    quiz_banco[2][21] = (QuizPerg){ "Por que proteger nascentes?", "A) Porque garantem água limpa", "B) Porque dão brinquedos", "C) Porque somem", 'A' };
+    quiz_banco[2][22] = (QuizPerg){ "O que são energias limpas?", "A) Fontes que poluem menos", "B) Fontes que poluem mais", "C) Fontes imaginárias", 'A' };
+    quiz_banco[2][23] = (QuizPerg){ "Como plantar ajuda na cidade?", "A) Melhora o ar e a sombra", "B) Aumenta barulho", "C) Ocupa espaço inútil", 'A' };
+    quiz_banco[2][24] = (QuizPerg){ "Por que evitar desperdício de comida?", "A) Porque ajuda a natureza e as pessoas", "B) Porque estraga a casa", "C) Porque vira festa", 'A' };
+    quiz_banco[2][25] = (QuizPerg){ "O que é compostagem?", "A) Transformar restos em adubo", "B) Jogar comida fora", "C) Guardar lixo por anos", 'A' };
+    quiz_banco[2][26] = (QuizPerg){ "Como conservar a biodiversidade?", "A) Protegendo habitats e evitando caça", "B) Construindo mais casas no mato", "C) Queimando florestas", 'A' };
+    quiz_banco[2][27] = (QuizPerg){ "Por que praias limpas são importantes?", "A) Protegem animais marinhos", "B) Para construir prédios", "C) Para jogar lixo no mar", 'A' };
+    quiz_banco[2][28] = (QuizPerg){ "O que são áreas protegidas?", "A) Locais onde a natureza é preservada", "B) Locais para jogar lixo", "C) Lojas grandes", 'A' };
+    quiz_banco[2][29] = (QuizPerg){ "Como evitar lixo no chão?", "A) Jogando no lixo certo", "B) Deixando no chão para voar", "C) Enterrando tudo", 'A' };
+    quiz_banco[2][30] = (QuizPerg){ "O que é uma árvore nativa?", "A) Planta que nasceu naquela região", "B) Planta de brinquedo", "C) Planta importada", 'A' };
+    quiz_banco[2][31] = (QuizPerg){ "Como a água e o meio ambiente estão ligados?", "A) água alimenta plantas e animais", "B) não têm ligação", "C) água Só existe na cidade", 'A' };
+    quiz_banco[2][32] = (QuizPerg){ "Por que cuidar do solo?", "A) Porque plantas precisam dele para crescer", "B) Porque o solo gosta de música", "C) Porque o solo anda", 'A' };
+    quiz_banco[2][33] = (QuizPerg){ "O que são recursos renováveis?", "A) Recursos que se renovam naturalmente", "B) Recursos que somem", "C) Recursos plastificados", 'A' };
+    quiz_banco[2][34] = (QuizPerg){ "Por que as florestas são importantes?", "A) Abrigam animais e regulam o clima", "B) Só servem para caminhar", "C) Só fazem fumaça", 'A' };
+    quiz_banco[2][35] = (QuizPerg){ "O que é consumo consciente?", "A) Comprar e usar com responsabilidade", "B) Comprar tudo que vê", "C) Jogar coisas fora", 'A' };
+    quiz_banco[2][36] = (QuizPerg){ "Por que preservar insetos como besouros e joaninhas?", "A) Porque ajudam no equilíbrio dos jardins", "B) Porque são perigosos", "C) Porque sujam tudo", 'A' };
+    quiz_banco[2][37] = (QuizPerg){ "Como reduzir emissão de gases?", "A) Usando transporte coletivo e energia limpa", "B) Queimando mais coisas", "C) Piscando luzes", 'A' };
+    quiz_banco[2][38] = (QuizPerg){ "O que fazer quando encontrar um animal ferido?", "A) Avisar um adulto ou Órgão competente", "B) Mexer sozinho sem saber", "C) Ignorar", 'A' };
+    quiz_banco[2][39] = (QuizPerg){ "Quem cuida do meio ambiente?", "A) Todas as pessoas", "B) Só cientistas", "C) Só políticos", 'A' };
+}
+
+/* inicializa histórico com -1 (vazio) */
+static void quiz_init_hist(void) {
+    for (int t = 0; t < 3; ++t) {
+        for (int h = 0; h < QUIZ_HIST; ++h) {
+            for (int j = 0; j < QUIZ_SELECAO; ++j) {
+                quiz_hist[t][h][j] = -1;
+            }
+        }
+        quiz_hist_pos[t] = 0;
+    }
+}
+
+static void quiz_sortear(int tema) {
+    if (tema < 0 || tema > 2) return;
+    int usados[QUIZ_TOTAL];
+    for (int i = 0; i < QUIZ_TOTAL; ++i) usados[i] = 0;
+
+    /* marca IDs presentes nos últimos QUIZ_HIST quizzes */
+    for (int h = 0; h < QUIZ_HIST; ++h) {
+        for (int j = 0; j < QUIZ_SELECAO; ++j) {
+            int id = quiz_hist[tema][h][j];
+            if (id >= 0 && id < QUIZ_TOTAL) usados[id] = 1;
+        }
+    }
+
+    /* sorteio: preferir IDs não usados; se faltar espaço, permite reuso */
+    int count = 0;
+    int attempts = 0;
+    while (count < QUIZ_SELECAO && attempts < 10000) {
+        int id = rand() % QUIZ_TOTAL;
+        if (!usados[id]) {
+            quiz_sorteio[count++] = id;
+            usados[id] = 1; /* evita repetição na mesma partida */
+        }
+        attempts++;
+        if (attempts > 5000 && count < QUIZ_SELECAO) {
+            for (int i = 0; i < QUIZ_TOTAL && count < QUIZ_SELECAO; ++i) {
+                if (!usados[i]) { quiz_sorteio[count++] = i; usados[i] = 1; }
+            }
+        }
+    }
+    if (count < QUIZ_SELECAO) {
+        /* fallback: preencha com índices remanescentes (mesmo que já no histórico) */
+        for (int i = 0; i < QUIZ_TOTAL && count < QUIZ_SELECAO; ++i) {
+            int found = 0;
+            for (int k = 0; k < count; ++k) if (quiz_sorteio[k] == i) { found = 1; break; }
+            if (!found) quiz_sorteio[count++] = i;
+        }
+    }
+
+    /* salva no histórico circular */
+    int pos = quiz_hist_pos[tema];
+    for (int i = 0; i < QUIZ_SELECAO; ++i) quiz_hist[tema][pos][i] = quiz_sorteio[i];
+    quiz_hist_pos[tema] = (quiz_hist_pos[tema] + 1) % QUIZ_HIST;
+
+    /* === define-se, para cada pergunta sorteada, qual letra A/B/C será correta === */
+    /* A correta deve vir do banco */
+    /* === Embaralhar as opções A/B/C e definir posição da correta === */
+    for (int p = 0; p < QUIZ_SELECAO; ++p) {
+
+        int id = quiz_sorteio[p];
+        QuizPerg* q = &quiz_banco[tema][id];
+
+        /* pega a resposta correta original do banco */
+        const char* correta_original =
+            (q->correta == 'A') ? q->opA :
+            (q->correta == 'B') ? q->opB :
+            q->opC;
+
+        /* sorteia a nova posição: 0=A, 1=B, 2=C */
+        int pos = rand() % 3;
+
+        /* buffers temporários */
+        char opA_nova[256], opB_nova[256], opC_nova[256];
+
+        if (pos == 0) {  /* correta vira A */
+            strcpy(opA_nova, correta_original);
+            if (q->correta == 'A') { strcpy(opB_nova, q->opB); strcpy(opC_nova, q->opC); }
+            else if (q->correta == 'B') { strcpy(opB_nova, q->opA); strcpy(opC_nova, q->opC); }
+            else { strcpy(opB_nova, q->opA); strcpy(opC_nova, q->opB); }
+            quiz_random_correta[p] = 'A';
+        }
+        else if (pos == 1) {  /* correta vira B */
+            strcpy(opB_nova, correta_original);
+            if (q->correta == 'A') { strcpy(opA_nova, q->opB); strcpy(opC_nova, q->opC); }
+            else if (q->correta == 'B') { strcpy(opA_nova, q->opA); strcpy(opC_nova, q->opC); }
+            else { strcpy(opA_nova, q->opA); strcpy(opC_nova, q->opB); }
+            quiz_random_correta[p] = 'B';
+        }
+        else {  /* correta vira C */
+            strcpy(opC_nova, correta_original);
+            if (q->correta == 'A') { strcpy(opA_nova, q->opB); strcpy(opB_nova, q->opC); }
+            else if (q->correta == 'B') { strcpy(opA_nova, q->opA); strcpy(opB_nova, q->opC); }
+            else { strcpy(opA_nova, q->opA); strcpy(opB_nova, q->opB); }
+            quiz_random_correta[p] = 'C';
+        }
+
+        /* sobrescreve na pergunta */
+        q->opA = strdup(opA_nova);
+        q->opB = strdup(opB_nova);
+        q->opC = strdup(opC_nova);
+    }
+}
+
+/* inicia um quiz para o tema (chamar ao entrar na tela de tema) */
+static void quiz_start(int tema) {
+    quiz_tema_atual = tema;
+    quiz_qindex = 0;
+    quiz_score = 0;
+    quiz_ativo = true;
+    /* reseta qualquer animação pendente */
+    anim_avatar_ativa = false;
+    anim_avatar_contagem = 0;
+    anim_avatar_phase = 0;
+    quiz_sortear(tema);
+}
+
+/* ------------------- animação do avatar (início + atualização/render) -------- */
+
+/* inicia a animação do avatar no centro da tela (abaixar + saltar N vezes) */
+static void iniciar_animacao_avatar(void) {
+    if (g_avatar_escolhido < 0 || g_avatar_escolhido >= AVA_COUNT) return;
+    anim_avatar_ativa = true;
+    anim_avatar_contagem = 0;
+    anim_avatar_phase = 1; /* começar pelo abaixar */
+    anim_avatar_t0 = SDL_GetTicks();
+
+    /* definir rect do avatar central (tamanho maior para destaque) */
+    anim_avatar_rect.w = 150;
+    anim_avatar_rect.h = 150;
+    anim_avatar_rect.x = (LARG - anim_avatar_rect.w) / 2;
+    anim_avatar_rect.y = (ALT - anim_avatar_rect.h) / 2;
+}
+/* Animação rápida no canto superior esquerdo (1 salto por acerto) */
+static void iniciar_animacao_top_esq(void) {
+    if (g_avatar_escolhido < 0) return;
+
+    anim_top_esq_ativa = true;
+    anim_top_esq_phase = 1;
+    anim_top_esq_t0 = SDL_GetTicks();
+
+    anim_top_esq_rect.x = 16;
+    anim_top_esq_rect.y = 16;
+    anim_top_esq_rect.w = 64;
+    anim_top_esq_rect.h = 64;
+}
+
+/* atualiza e desenha a animação do avatar; deve ser chamada dentro do render do tema */
+static void animacao_avatar_update_and_render(void) {
+    if (!anim_avatar_ativa) return;
+
+    Uint32 agora = SDL_GetTicks();
+    Uint32 intervalo = 180; /* ms por subfase (ajustável) */
+
+    /* cada salto tem três subfases: abaixar -> subir (salto) -> retorno */
+    if (agora - anim_avatar_t0 >= intervalo) {
+        anim_avatar_t0 = agora;
+        if (anim_avatar_phase == 1) {
+            /* abaixar: pequeno deslocamento para baixo */
+            anim_avatar_rect.y += 20;
+            anim_avatar_phase = 2;
+        }
+        else if (anim_avatar_phase == 2) {
+            /* salto: deslocamento para cima (maior que abaixar) */
+            anim_avatar_rect.y -= 70;
+            anim_avatar_phase = 3;
+        }
+        else if (anim_avatar_phase == 3) {
+            /* retorno: volta próxima da posição central, contabiliza 1 salto */
+            anim_avatar_rect.y += 50; /* volta próximo do centro; compensa os -70 e +20 */
+            anim_avatar_phase = 1;
+            anim_avatar_contagem++;
+            /* se completou o número de saltos, termina animação após este retorno */
+            if (anim_avatar_contagem >= anim_avatar_total_saltos) {
+                anim_avatar_ativa = false;
+                anim_avatar_contagem = 0;
+                anim_avatar_phase = 0;
+                /* garantir que o avatar termine exatamente no centro */
+                anim_avatar_rect.x = (LARG - anim_avatar_rect.w) / 2;
+                anim_avatar_rect.y = (ALT - anim_avatar_rect.h) / 2;
+            }
+        }
+    }
+
+    /* desenha um fundo translúcido atrás da animação para destaque */
+    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 140);
+    SDL_Rect fundo = { 40, 40, LARG - 80, ALT - 120 };
+    SDL_RenderFillRect(g_renderer, &fundo);
+
+    /* desenha avatar (se textura existe) */
+    if (g_avatar_escolhido >= 0 && g_avatar_escolhido < AVA_COUNT && g_avatars[g_avatar_escolhido].tex) {
+        SDL_RenderCopy(g_renderer, g_avatars[g_avatar_escolhido].tex, NULL, &anim_avatar_rect);
+    } else {
+        /* fallback: desenha rect simples */
+        SDL_SetRenderDrawColor(g_renderer, 200, 200, 200, 255);
+        SDL_RenderFillRect(g_renderer, &anim_avatar_rect);
+        SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+        SDL_RenderDrawRect(g_renderer, &anim_avatar_rect);
+    }
+
+    /* mensagem de parabéns abaixo da animação */
+    const char* msg = "Parabéns! Você está no caminho certo na busca de um mundo sustentável!!!";
+    /* desenhar_texto usa a fonte carregada; posicionar um pouco acima do rodapé */
+    desenhar_texto("Parabéns! Você está no caminho certo na busca de um mundo sustentável!!!", 60, ALT - 80);
+}
+/* Atualiza + desenha o avatar pequeno saltando no canto superior esquerdo */
+static void animacao_top_esq_update_and_render(void) {
+    if (!anim_top_esq_ativa) return;
+
+    Uint32 agora = SDL_GetTicks();
+    Uint32 intervalo = 120;  /* mais rápido que a animação grande */
+
+    if (agora - anim_top_esq_t0 >= intervalo) {
+        anim_top_esq_t0 = agora;
+
+        if (anim_top_esq_phase == 1) {
+            anim_top_esq_rect.y += 8;   /* abaixa */
+            anim_top_esq_phase = 2;
+        }
+        else if (anim_top_esq_phase == 2) {
+            anim_top_esq_rect.y -= 22;  /* salto */
+            anim_top_esq_phase = 3;
+        }
+        else if (anim_top_esq_phase == 3) {
+            anim_top_esq_rect.y += 14;  /* retorna */
+            anim_top_esq_phase = 0;
+            anim_top_esq_ativa = false;
+        }
+    }
+
+    /* desenhar avatar pequeno animado */
+    if (g_avatars[g_avatar_escolhido].tex) {
+        SDL_RenderCopy(g_renderer, g_avatars[g_avatar_escolhido].tex, NULL, &anim_top_esq_rect);
+    } else {
+        SDL_SetRenderDrawColor(g_renderer, 200, 200, 200, 255);
+        SDL_RenderFillRect(g_renderer, &anim_top_esq_rect);
+    }
+}
+
+/* ------------------- render e interação do quiz ------------------- */
+
+/* render do quiz: pergunta atual e opções */
+static void quiz_render(void) {
+    if (!quiz_ativo || quiz_tema_atual < 0 || quiz_tema_atual > 2) return;
+    int id = quiz_sorteio[quiz_qindex];
+    QuizPerg* q = &quiz_banco[quiz_tema_atual][id];
+
+    /* desenha caixa de pergunta */
+    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(g_renderer, 255, 0, 0, 255);
+    SDL_Rect caixa = { 90, 200, 820, 80 };
+    SDL_RenderFillRect(g_renderer, &caixa);
+
+    /* desenha texto da pergunta (wrap simples: usa TTF wrapped) */
+    if (g_font) {
+        SDL_Surface* sp = TTF_RenderUTF8_Blended_Wrapped(g_font, q->pergunta, (SDL_Color) { 0, 0, 255, 255 }, 800);
+        if (sp) {
+            SDL_Texture* tp = SDL_CreateTextureFromSurface(g_renderer, sp);
+            SDL_Rect dst = { 100, 225, sp->w, sp->h };
+            SDL_FreeSurface(sp);
+            if (tp) { SDL_RenderCopy(g_renderer, tp, NULL, &dst); SDL_DestroyTexture(tp); }
+        }
+    }
+
+    /* desenha botões de opção A/B/C (fixos) */
+    SDL_SetRenderDrawColor(g_renderer, 30, 140, 90, 255);
+    SDL_RenderFillRect(g_renderer, &r_btn_opA);
+    SDL_RenderFillRect(g_renderer, &r_btn_opB);
+    SDL_RenderFillRect(g_renderer, &r_btn_opC);
+    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+    SDL_RenderDrawRect(g_renderer, &r_btn_opA);
+    SDL_RenderDrawRect(g_renderer, &r_btn_opB);
+    SDL_RenderDrawRect(g_renderer, &r_btn_opC);
+
+    /* escreve as opções A/B/C (sempre nas mesmas posições) */
+    if (g_font) {
+        /* A */
+        SDL_Surface* sa = TTF_RenderUTF8_Blended_Wrapped(g_font, q->opA, (SDL_Color) { 255, 255, 255, 255 }, r_btn_opA.w - 20);
+        if (sa) {
+            SDL_Texture* ta = SDL_CreateTextureFromSurface(g_renderer, sa);
+            SDL_Rect dst = { r_btn_opA.x + 10, r_btn_opA.y + (r_btn_opA.h - sa->h) / 2, sa->w, sa->h };
+            SDL_FreeSurface(sa);
+            if (ta) { SDL_RenderCopy(g_renderer, ta, NULL, &dst); SDL_DestroyTexture(ta); }
+        }
+        /* B */
+        SDL_Surface* sb = TTF_RenderUTF8_Blended_Wrapped(g_font, q->opB, (SDL_Color) { 255, 255, 255, 255 }, r_btn_opB.w - 20);
+        if (sb) {
+            SDL_Texture* tb = SDL_CreateTextureFromSurface(g_renderer, sb);
+            SDL_Rect dst = { r_btn_opB.x + 10, r_btn_opB.y + (r_btn_opB.h - sb->h) / 2, sb->w, sb->h };
+            SDL_FreeSurface(sb);
+            if (tb) { SDL_RenderCopy(g_renderer, tb, NULL, &dst); SDL_DestroyTexture(tb); }
+        }
+        /* C */
+        SDL_Surface* sc = TTF_RenderUTF8_Blended_Wrapped(g_font, q->opC, (SDL_Color) { 255, 255, 255, 255 }, r_btn_opC.w - 20);
+        if (sc) {
+            SDL_Texture* tc = SDL_CreateTextureFromSurface(g_renderer, sc);
+            SDL_Rect dst = { r_btn_opC.x + 10, r_btn_opC.y + (r_btn_opC.h - sc->h) / 2, sc->w, sc->h };
+            SDL_FreeSurface(sc);
+            if (tc) { SDL_RenderCopy(g_renderer, tc, NULL, &dst); SDL_DestroyTexture(tc); }
+        }
+    }
+
+    /* mostra progresso e pontuação */
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Pergunta %d / %d", quiz_qindex + 1, QUIZ_SELECAO);
+    desenhar_texto(buf, 80, 120);
+    snprintf(buf, sizeof(buf), "Pontos: %d", quiz_score);
+    desenhar_texto(buf, LARG - 200, 120);
+}
+
+/* trata clique nas opções do quiz; retorna true se quiz avançou/terminou */
+static bool quiz_handle_click(int mx, int my) {
+    if (!quiz_ativo) return false;
+    if (dentro(&r_btn_opA, mx, my) || dentro(&r_btn_opB, mx, my) || dentro(&r_btn_opC, mx, my)) {
+        int id = quiz_sorteio[quiz_qindex];
+        QuizPerg* q = &quiz_banco[quiz_tema_atual][id];
+
+        /* feedback sonoro */
+        if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+
+        /* determina qual letra foi escolhida na UI (A/B/C) */
+        char escolhida = ' ';
+        if (dentro(&r_btn_opA, mx, my)) escolhida = 'A';
+        else if (dentro(&r_btn_opB, mx, my)) escolhida = 'B';
+        else if (dentro(&r_btn_opC, mx, my)) escolhida = 'C';
+
+        /* compara com a correta sorteada para esta pergunta (quiz_random_correta) */
+                /* compara com a correta sorteada para esta pergunta (quiz_random_correta) */
+        if (escolhida == quiz_random_correta[quiz_qindex]) {
+            /* incrementa pontuação */
+            quiz_score++;
+
+            /* INICIA animação do avatar a cada resposta correta */
+            iniciar_animacao_top_esq();
+        }
+
+        /* avança para próxima ou finaliza */
+        quiz_qindex++;
+        if (quiz_qindex >= QUIZ_SELECAO) {
+            quiz_ativo = false; /* quiz finalizado; usuário verá resultados na tela do tema (ou pode voltar) */
+
+            /* se pontuação >= 5, iniciar animação do avatar */
+            if (quiz_score >= 5) {
+                iniciar_animacao_avatar();
+            }
+
+            return true;
+        }
+        return true;
+    }
+    return false;
+}
+
+/* ------------------- início do main (continuação da inicialização) ------------- */
+
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+    srand((unsigned)time(NULL));
+
+    /* inicializa SDL video e audio */
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
+        fprintf(stderr, "SDL_Init erro: %s\n", SDL_GetError());
+        return 1;
+    }
+    /* inicializa subsistemas */
+    if (!(IMG_Init(IMG_INIT_PNG) & IMG_INIT_PNG)) {
+        SDL_Log("Aviso: IMG_Init falhou: %s", IMG_GetError());
+    }
+    if (TTF_Init() != 0) {
+        SDL_Log("Aviso: TTF_Init falhou: %s", TTF_GetError());
+    }
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0) {
+        SDL_Log("Aviso: Mix_OpenAudio falhou: %s", Mix_GetError());
+    }
+
+    /* cria janela e renderer */
+    g_window = SDL_CreateWindow("Jogo Educativo - Sustentabilidade", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, LARG, ALT, 0);
+    if (!g_window) {
+        fprintf(stderr, "SDL_CreateWindow erro: %s\n", SDL_GetError());
+        goto cleanup_all;
+    }
+    g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!g_renderer) {
+        fprintf(stderr, "SDL_CreateRenderer erro: %s\n", SDL_GetError());
+        goto cleanup_all;
+    }
+
+    /* carrega fonte (tenta fallback) */
+    g_font = TTF_OpenFont(ASSET_FONT, 24);
+    if (!g_font) {
+        SDL_Log("Aviso: não abriu fonte %s (%s). Tentando fallback.", ASSET_FONT, TTF_GetError());
+        g_font = TTF_OpenFont("assets/DejaVuSans.ttf", 24);
+        if (!g_font) SDL_Log("Aviso: fallback da fonte também falhou.");
+    }
+
+    /* inicializa módulos (tiles, avatars, audio, quiz banco e histórico) */
+    tiles_init();
+    avatar_init();
+    audio_load();
+    quiz_init_banco();
+    quiz_init_hist();
+
+    /* reproduzir música de menu inicialmente */
+    music_play_for_estado(EST_TELA_INICIAL);
+
+    /* estado inicial */
+    Estado estado = EST_TELA_INICIAL;
+    bool rodando = true;
+    SDL_Event evt;
+    Uint32 inicio = SDL_GetTicks();
+    const Uint32 DURACAO_TELA_INICIAL = 3000; /* ms */
+
+    while (rodando) {
+
+        /* ---------------------- EVENTOS ---------------------- */
+        while (SDL_PollEvent(&evt)) {
+            /* ---------------------- EVENTOS COM TIMEOUT ---------------------- */
+            if (SDL_WaitEventTimeout(&evt, 5)) {
+
+                /* Se chegou um evento, processa todos os eventos pendentes */
+                do {
+                    if (evt.type == SDL_QUIT) {
+                        rodando = false;
+                        break;
+                    }
+
+                    if (evt.type == SDL_KEYDOWN) {
+                        if (evt.key.keysym.sym == SDLK_ESCAPE) {
+
+                            if (estado == EST_TILE_AGUA || estado == EST_TILE_ENERGIA || estado == EST_TILE_MEIO) {
+                                estado = EST_MENU_TEMAS;
+                                music_play_for_estado(estado);
+                            }
+                            else if (estado == EST_SELECAO_AVATAR) {
+                                rodando = false;
+                            }
+                            else if (estado == EST_MENU_TEMAS) {
+                                estado = EST_SELECAO_AVATAR;
+                                music_play_for_estado(estado);
+                            }
+                            else {
+                                rodando = false;
+                            }
+                        }
+                    }
+
+                    /* ---------------------- CLICK MOUSE ---------------------- */
+                    if (evt.type == SDL_MOUSEBUTTONDOWN) {
+
+                        int mx = evt.button.x;
+                        int my = evt.button.y;
+
+                        /* ---------- tela inicial ---------- */
+                        if (estado == EST_TELA_INICIAL) {
+                            if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                            estado = EST_SELECAO_AVATAR;
+                            music_play_for_estado(estado);
+                        }
+
+                        /* ---------- seleção avatar ---------- */
+                        else if (estado == EST_SELECAO_AVATAR) {
+
+                            avatar_on_click(mx, my);
+
+                            if (dentro(&r_btn_seguinte, mx, my)) {
+
+                                if (g_avatar_escolhido >= 0) {
+                                    if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                                    fade_out_transition();
+                                    estado = EST_MENU_TEMAS;
+                                    music_play_for_estado(estado);
+                                }
+                                else {
+                                    SDL_SetRenderDrawColor(g_renderer, 200, 50, 50, 255);
+                                    SDL_RenderFillRect(g_renderer, &r_btn_seguinte);
+                                    SDL_RenderPresent(g_renderer);
+                                    SDL_Delay(120);
+                                }
+                            }
+                        }
+
+                        /* ---------- menu temas ---------- */
+                        else if (estado == EST_MENU_TEMAS) {
+
+                            if (dentro(&r_btn_voltar, mx, my)) {
+                                if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                                estado = EST_SELECAO_AVATAR;
+                                music_play_for_estado(estado);
+                            }
+
+                            else if (dentro(&r_btn_tema_agua, mx, my)) {
+                                if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                                estado = EST_TILE_AGUA;
+                                music_play_for_estado(estado);
+                                quiz_start(0);
+                            }
+
+                            else if (dentro(&r_btn_tema_energia, mx, my)) {
+                                if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                                estado = EST_TILE_ENERGIA;
+                                music_play_for_estado(estado);
+                                quiz_start(1);
+                            }
+
+                            else if (dentro(&r_btn_tema_meio, mx, my)) {
+                                if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                                estado = EST_TILE_MEIO;
+                                music_play_for_estado(estado);
+                                quiz_start(2);
+                            }
+                        }
+
+                        /* ---------- tela do tema + quiz ---------- */
+                        else if (estado == EST_TILE_AGUA ||
+                            estado == EST_TILE_ENERGIA ||
+                            estado == EST_TILE_MEIO) {
+
+                            if (dentro(&r_btn_voltar, mx, my)) {
+                                if (g_som_click) Mix_PlayChannel(-1, g_som_click, 0);
+                                estado = EST_MENU_TEMAS;
+                                music_play_for_estado(estado);
+                                quiz_ativo = false;
+                            }
+
+                            else if (quiz_ativo) {
+                                quiz_handle_click(mx, my);
+                            }
+                        }
+                    }
+
+                } while (SDL_PollEvent(&evt));
+            }
+
+        } 
+
+
+        /* ---------- Timeout da tela inicial ---------- */
+        if (estado == EST_TELA_INICIAL &&
+            SDL_GetTicks() - inicio > DURACAO_TELA_INICIAL) {
+            estado = EST_SELECAO_AVATAR;
+            music_play_for_estado(estado);
+        }
+
+
+        /* ---------------------- RENDER POR ESTADO ---------------------- */
+
+        /* ---------- TELA INICIAL ---------- */
+        if (estado == EST_TELA_INICIAL) {
+
+            tiles_render_menu_bg();
+
+            if (g_font) {
+                SDL_Surface* st = TTF_RenderUTF8_Blended(
+                    g_font, "Jogo da Sustentabilidade",
+                    (SDL_Color){0,200,0,255});
+                if (st) {
+                    SDL_Texture* tt = SDL_CreateTextureFromSurface(g_renderer, st);
+                    SDL_Rect dst = { (LARG - st->w)/2, 200, st->w, st->h };
+                    SDL_FreeSurface(st);
+                    if (tt) { SDL_RenderCopy(g_renderer, tt, NULL, &dst); SDL_DestroyTexture(tt); }
+                }
+
+                SDL_Surface* s2 = TTF_RenderUTF8_Blended(
+                    g_font, "Clique para continuar",
+                    (SDL_Color){0,200,0,255});
+                if (s2) {
+                    SDL_Texture* t2 = SDL_CreateTextureFromSurface(g_renderer, s2);
+                    SDL_Rect dst = { (LARG - s2->w)/2, 260, s2->w, s2->h };
+                    SDL_FreeSurface(s2);
+                    if (t2) { SDL_RenderCopy(g_renderer, t2, NULL, &dst); SDL_DestroyTexture(t2); }
+                }
+            }
+
+            SDL_RenderPresent(g_renderer);
+            SDL_Delay(16);
+            continue;
+        }
+
+
+        /* ---------- SELEÇÃO AVATAR ---------- */
+        else if (estado == EST_SELECAO_AVATAR) {
+
+            tiles_render_menu_bg();
+
+            if (g_font) {
+                SDL_Surface* s = TTF_RenderUTF8_Blended(
+                    g_font, "Escolha um avatar",
+                    (SDL_Color){0,200,0,255});
+                if (s) {
+                    SDL_Texture* t = SDL_CreateTextureFromSurface(g_renderer, s);
+                    SDL_Rect dst = { (LARG - s->w)/2, 150, s->w, s->h };
+                    SDL_FreeSurface(s);
+                    if (t) { SDL_RenderCopy(g_renderer, t, NULL, &dst); SDL_DestroyTexture(t); }
+                }
+            }
+
+            avatar_render();
+
+            if (g_btn_seguinte_tex)
+                SDL_RenderCopy(g_renderer, g_btn_seguinte_tex, NULL, &r_btn_seguinte);
+            else
+                draw_button_rect_text(&r_btn_seguinte, "Seguinte");
+
+            SDL_RenderPresent(g_renderer);
+            SDL_Delay(16);
+            continue;
+        }
+
+
+        /* ---------- MENU TEMAS ---------- */
+        else if (estado == EST_MENU_TEMAS) {
+
+            tiles_render_menu_bg();
+
+            if (g_font) {
+                SDL_Surface* s = TTF_RenderUTF8_Blended(
+                    g_font, "Escolha um tema:",
+                    (SDL_Color){0,200,0,255});
+                if (s) {
+                    SDL_Texture* t = SDL_CreateTextureFromSurface(g_renderer, s);
+                    SDL_Rect dst = { (LARG - s->w)/2, 80, s->w, s->h };
+                    SDL_FreeSurface(s);
+                    if (t) { SDL_RenderCopy(g_renderer, t, NULL, &dst); SDL_DestroyTexture(t); }
+                }
+            }
+
+            draw_button_rect_text(&r_btn_tema_agua,    "Água");
+            draw_button_rect_text(&r_btn_tema_energia, "Energia");
+            draw_button_rect_text(&r_btn_tema_meio,    "Meio Ambiente");
+
+            if (g_btn_voltar_tex)
+                SDL_RenderCopy(g_renderer, g_btn_voltar_tex, NULL, &r_btn_voltar);
+            else
+                draw_button_rect_text(&r_btn_voltar, "Voltar");
+
+            draw_selected_avatar_top_left();
+
+            SDL_RenderPresent(g_renderer);
+            SDL_Delay(16);
+            continue;
+        }
+
+
+        /* ---------- TELAS DE TEMA + QUIZ ---------- */
+        else if (estado == EST_TILE_AGUA ||
+                 estado == EST_TILE_ENERGIA ||
+                 estado == EST_TILE_MEIO) {
+
+            int tema = (estado == EST_TILE_AGUA) ? 0 :
+                       (estado == EST_TILE_ENERGIA) ? 1 : 2;
+
+            tiles_render_tema(tema);
+
+            if (g_btn_voltar_tex)
+                SDL_RenderCopy(g_renderer, g_btn_voltar_tex, NULL, &r_btn_voltar);
+            else
+                draw_button_rect_text(&r_btn_voltar, "Voltar");
+
+            draw_selected_avatar_top_left();
+            animacao_top_esq_update_and_render();
+
+            if (quiz_ativo) {
+                quiz_render();
+            }
+            else {
+                if (quiz_qindex >= QUIZ_SELECAO) {
+
+                    if (quiz_score >= 5 && anim_avatar_ativa) {
+                        animacao_avatar_update_and_render();
+                    }
+                    else {
+                        char res[64];
+                        snprintf(res, sizeof(res),
+                                 "Quiz finalizado! Pontos: %d / %d",
+                                 quiz_score, QUIZ_SELECAO);
+                        desenhar_texto(res, 120, 200);
+
+                        desenhar_texto("Clique em Voltar para escolher outro tema.",
+                                        120, 240);
+                    }
+                }
+            }
+
+            SDL_RenderPresent(g_renderer);
+            SDL_Delay(16);
+            continue;
+        }
+
+        SDL_Delay(8);
+    } 
+
+    /* ---------------------- LIMPEZA FINAL ---------------------- */
+
+cleanup_all:
+
+    /* liberar áudio */
+    audio_free();
+
+    /* liberar tiles */
+    tiles_destroy();
+
+    /* liberar avatares */
+    avatar_destroy();
+
+    /* liberar fonte */
+    if (g_font) {
+        TTF_CloseFont(g_font);
+        g_font = NULL;
+    }
+
+    /* destruir renderer e janela */
+    if (g_renderer) {
+        SDL_DestroyRenderer(g_renderer);
+        g_renderer = NULL;
+    }
+
+    if (g_window) {
+        SDL_DestroyWindow(g_window);
+        g_window = NULL;
+    }
+
+    /* encerrar subsistemas */
+    Mix_CloseAudio();
+    TTF_Quit();
+    IMG_Quit();
+    SDL_Quit();
+
+    return 0;
+} 
